@@ -1,0 +1,57 @@
+DATASET VALIDATION REPORT
+Project: Mainframe-Based Banking Transaction Reconciliation and EOD Settlement Validation System
+Dataset owner: Atharv Katkar
+
+PRIMARY DATASETS
+PASS: Transaction file contains 10,000 records, each 38 characters long, with 10,000 unique TXN_IDs.
+PASS: Settlement file contains 10,000 records, each 38 characters long, with 10,000 unique TXN_IDs.
+PASS: Transaction and settlement files match record-for-record.
+
+TEST SCENARIOS
+PASS: Normal scenario contains 5 transaction records and 5 settlement records.
+PASS: Duplicate scenario contains 7 transaction records, 5 unique transaction records, and 5 settlement records.
+PASS: Mismatch scenario contains the same TXN_ID with different amounts.
+PASS: Missing scenario contains one transaction-only ID and one settlement-only ID.
+
+RECORD-LENGTH CHECK
+PASS: All 8 scenario test files contain records exactly 38 characters long.
+
+SCOPE AND LIMITATIONS
+These checks validate local text-file contents and record lengths.
+DFSORT, COBOL, JCL, and mainframe execution have not been validated by this report.
+The 38-byte layout and duplicate-handling policy must be confirmed for shared integration and mainframe execution.
+### Duplicate Removal Simulation
+
+- Input transaction records: 7
+- Expected output records: 5
+- Duplicate records removed: 2
+- Output TXN_IDs are unique: PASS
+- Output sorted by TXN_ID: PASS
+- Settlement test records: 5
+- Settlement record length validation: PASS
+
+**Note:** This expected output was generated and verified locally using PowerShell. It is a reference for testing, not evidence of actual DFSORT execution on z/OS.
+### Automated Local Validation
+
+- Validation script: `validate_datasets.ps1`
+- Main transaction dataset: PASS — 10,000 records
+- Main settlement dataset: PASS — 10,000 records
+- Test files checked: 9
+- Record count checks: PASS
+- Record length checks (38 characters): PASS
+- Overall result: PASS — all 11 file checks passed
+
+**Scope:** These checks validate local text files only. They do not confirm actual DFSORT, JCL, COBOL, REXX, Db2, VSAM, or z/OS execution.
+
+### DFSORT Control Statement — Proposed
+
+Control file: `SORTCNTL.txt`
+
+- Sort key: `TXN_ID`, positions 1–10, ascending.
+- Duplicate handling: `SUM FIELDS=NONE` proposes retaining one record per sort key.
+- Duplicate test input: 7 transaction records.
+- Expected deduplicated output: 5 records.
+- Expected duplicates removed: 2.
+- Local reference output: `test-data/duplicate/EXPECTED_DEDUPED_TRANSACTION.txt`.
+
+**Status:** Prepared for team review. Actual DFSORT execution and output comparison on z/OS are pending. Confirm the duplicate-handling policy with the team before integration.

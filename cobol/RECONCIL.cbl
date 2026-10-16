@@ -1,0 +1,202 @@
+IDENTIFICATION DIVISION.
+ PROGRAM-ID. RECONCIL.
+*---------------------------------------------------------------
+* Course Assignment #2:
+*   TRANIN  - 80-byte PS file; key in columns 13-20.
+*   SETTIN  - 80-byte PS file; key in columns 21-28.
+*   MATCHOUT - transaction records whose keys match.
+*
+* Project extension:
+*   Count and report matching and unmatched records.
+*
+* IMPORTANT:
+*   Inputs must be sorted ascending by the key positions above.
+*   This starter compares keys only. The supplied statement does
+*   not define amount/date field positions, so amount-based
+*   MISMATCHED classification cannot safely be inferred yet.
+*   Confirm the final layout with the team before integration.
+*---------------------------------------------------------------
+ ENVIRONMENT DIVISION.
+ INPUT-OUTPUT SECTION.
+ FILE-CONTROL.
+     SELECT TRAN-FILE ASSIGN TO TRANIN
+         ORGANIZATION IS SEQUENTIAL
+         FILE STATUS IS TRAN-STATUS.
+     SELECT SETTLE-FILE ASSIGN TO SETTIN
+         ORGANIZATION IS SEQUENTIAL
+         FILE STATUS IS SETTLE-STATUS.
+     SELECT MATCH-FILE ASSIGN TO MATCHOUT
+         ORGANIZATION IS SEQUENTIAL
+         FILE STATUS IS MATCH-STATUS.
+     SELECT REPORT-FILE ASSIGN TO REPORTOUT
+         ORGANIZATION IS SEQUENTIAL
+         FILE STATUS IS REPORT-STATUS.
+
+ DATA DIVISION.
+ FILE SECTION.
+ FD  TRAN-FILE
+     RECORD CONTAINS 80 CHARACTERS.
+ 01  TRAN-REC                 PIC X(80).
+
+ FD  SETTLE-FILE
+     RECORD CONTAINS 80 CHARACTERS.
+ 01  SETTLE-REC              PIC X(80).
+
+ FD  MATCH-FILE
+     RECORD CONTAINS 80 CHARACTERS.
+ 01  MATCH-REC               PIC X(80).
+
+ FD  REPORT-FILE
+     RECORD CONTAINS 120 CHARACTERS.
+ 01  REPORT-REC              PIC X(120).
+
+ WORKING-STORAGE SECTION.
+ 01  TRAN-STATUS             PIC XX.
+ 01  SETTLE-STATUS           PIC XX.
+ 01  MATCH-STATUS            PIC XX.
+ 01  REPORT-STATUS           PIC XX.
+
+ 01  TRAN-EOF                PIC X VALUE 'N'.
+     88 TRAN-END             VALUE 'Y'.
+ 01  SETTLE-EOF              PIC X VALUE 'N'.
+     88 SETTLE-END           VALUE 'Y'.
+
+ 01  TRAN-KEY                PIC X(8).
+ 01  SETTLE-KEY              PIC X(8).
+
+ 01  TRAN-COUNT              PIC 9(7) VALUE ZERO.
+ 01  SETTLE-COUNT            PIC 9(7) VALUE ZERO.
+ 01  MATCH-COUNT             PIC 9(7) VALUE ZERO.
+ 01  TRAN-MISSING-COUNT      PIC 9(7) VALUE ZERO.
+ 01  SETTLE-MISSING-COUNT    PIC 9(7) VALUE ZERO.
+ 01  IO-ERROR                PIC X VALUE 'N'.
+
+ PROCEDURE DIVISION.
+ MAIN-PROCESS.
+     OPEN INPUT TRAN-FILE SETTLE-FILE
+     IF TRAN-STATUS NOT = '00'
+         DISPLAY 'ERROR OPENING TRANIN. FILE STATUS='
+                 TRAN-STATUS
+         MOVE 'Y' TO IO-ERROR
+     END-IF
+     IF SETTLE-STATUS NOT = '00'
+         DISPLAY 'ERROR OPENING SETTIN. FILE STATUS='
+                 SETTLE-STATUS
+         MOVE 'Y' TO IO-ERROR
+     END-IF
+
+     IF IO-ERROR = 'Y'
+         MOVE 12 TO RETURN-CODE
+         GOBACK
+     END-IF
+
+     OPEN OUTPUT MATCH-FILE REPORT-FILE
+     IF MATCH-STATUS NOT = '00'
+         DISPLAY 'ERROR OPENING MATCHOUT. FILE STATUS='
+                 MATCH-STATUS
+         MOVE 'Y' TO IO-ERROR
+     END-IF
+     IF REPORT-STATUS NOT = '00'
+         DISPLAY 'ERROR OPENING REPORTOUT. FILE STATUS='
+                 REPORT-STATUS
+         MOVE 'Y' TO IO-ERROR
+     END-IF
+
+     IF IO-ERROR = 'Y'
+         CLOSE TRAN-FILE SETTLE-FILE
+         MOVE 12 TO RETURN-CODE
+         GOBACK
+     END-IF
+
+     PERFORM READ-TRAN
+     PERFORM READ-SETTLE
+
+     PERFORM UNTIL TRAN-END AND SETTLE-END
+         EVALUATE TRUE
+             WHEN TRAN-END
+                 PERFORM WRITE-SETTLE-MISSING
+                 PERFORM READ-SETTLE
+             WHEN SETTLE-END
+                 PERFORM WRITE-TRAN-MISSING
+                 PERFORM READ-TRAN
+             WHEN TRAN-KEY = SETTLE-KEY
+                 MOVE TRAN-REC TO MATCH-REC
+                 WRITE MATCH-REC
+                 ADD 1 TO MATCH-COUNT
+                 PERFORM READ-TRAN
+                 PERFORM READ-SETTLE
+             WHEN TRAN-KEY < SETTLE-KEY
+                 PERFORM WRITE-TRAN-MISSING
+                 PERFORM READ-TRAN
+             WHEN OTHER
+                 PERFORM WRITE-SETTLE-MISSING
+                 PERFORM READ-SETTLE
+         END-EVALUATE
+     END-PERFORM
+
+     CLOSE TRAN-FILE SETTLE-FILE MATCH-FILE REPORT-FILE
+
+     DISPLAY 'TRANSACTION RECORDS READ: ' TRAN-COUNT
+     DISPLAY 'SETTLEMENT RECORDS READ:   ' SETTLE-COUNT
+     DISPLAY 'MATCHED RECORDS:           ' MATCH-COUNT
+     DISPLAY 'TRANSACTION WITHOUT SETTLEMENT: '
+             TRAN-MISSING-COUNT
+     DISPLAY 'SETTLEMENT WITHOUT TRANSACTION: '
+             SETTLE-MISSING-COUNT
+
+     IF IO-ERROR = 'Y'
+         MOVE 12 TO RETURN-CODE
+     ELSE
+         MOVE 0 TO RETURN-CODE
+     END-IF
+     GOBACK.
+
+ READ-TRAN.
+     READ TRAN-FILE
+         AT END
+             SET TRAN-END TO TRUE
+         NOT AT END
+             ADD 1 TO TRAN-COUNT
+             MOVE TRAN-REC(13:8) TO TRAN-KEY
+     END-READ
+     IF TRAN-STATUS NOT = '00' AND TRAN-STATUS NOT = '10'
+         DISPLAY 'ERROR READING TRANIN. FILE STATUS='
+                 TRAN-STATUS
+         MOVE 'Y' TO IO-ERROR
+         SET TRAN-END TO TRUE
+     END-IF.
+
+ READ-SETTLE.
+     READ SETTLE-FILE
+         AT END
+             SET SETTLE-END TO TRUE
+         NOT AT END
+             ADD 1 TO SETTLE-COUNT
+             MOVE SETTLE-REC(21:8) TO SETTLE-KEY
+     END-READ
+     IF SETTLE-STATUS NOT = '00' AND SETTLE-STATUS NOT = '10'
+         DISPLAY 'ERROR READING SETTIN. FILE STATUS='
+                 SETTLE-STATUS
+         MOVE 'Y' TO IO-ERROR
+         SET SETTLE-END TO TRUE
+     END-IF.
+
+ WRITE-TRAN-MISSING.
+     INITIALIZE REPORT-REC
+     STRING 'TRANSACTION KEY NOT FOUND IN SETTLEMENT: '
+            TRAN-KEY
+            DELIMITED BY SIZE
+            INTO REPORT-REC
+     END-STRING
+     WRITE REPORT-REC
+     ADD 1 TO TRAN-MISSING-COUNT.
+
+ WRITE-SETTLE-MISSING.
+     INITIALIZE REPORT-REC
+     STRING 'SETTLEMENT KEY NOT FOUND IN TRANSACTION: '
+            SETTLE-KEY
+            DELIMITED BY SIZE
+            INTO REPORT-REC
+     END-STRING
+     WRITE REPORT-REC
+     ADD 1 TO SETTLE-MISSING-COUNT.

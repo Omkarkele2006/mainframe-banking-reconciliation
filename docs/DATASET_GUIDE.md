@@ -18,3 +18,11 @@ These files use the current working 38-byte fixed-width record layout documented
 The primary datasets contain fictional test data. Before shared integration or mainframe execution, confirm the layout, dataset attributes, and duplicate-handling policy with the team.
 
 If approved for mainframe use, the proposed dataset attributes are `RECFM=FB` and `LRECL=38`. The files have no header row or field delimiters.
+
+## Invalid-record REXX test
+
+`test-data/INVALID_RECORD_TEST.txt` contains a 37-character record. The local PowerShell check verifies the fixture length only and does not demonstrate that `VALIDATE.rex` rejects the record.
+
+For the mainframe test, use an approved input method that preserves the record's actual 37-character length. Do not assume that loading the record into a dataset defined as `RECFM=FB,LRECL=38` will preserve the short length, because it may be padded to 38 bytes.
+
+Run the validator against the test input and record the observed output and return code. If the test input is padded, use a different approved test method. Mark the test as pending until actual rejection has been observed.

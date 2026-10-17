@@ -1,8 +1,8 @@
-
 /* REXX */
 /* Module: VALIDATE.rex */
 /* Purpose: Validate transaction and settlement datasets */
 /* Expected record length: 38 characters */
+/* Mainframe execution must be tested in the target TSO/REXX environment. */
 
 ADDRESS TSO
 
@@ -10,24 +10,23 @@ SAY '========================================'
 SAY ' BANKING RECONCILIATION VALIDATION'
 SAY '========================================'
 
-/* Replace these placeholders with agreed dataset names */
-TRAN_DSN = 'YOURID.TRANSACTION'
-SETT_DSN = 'YOURID.SETTLEMENT'
+/* Dataset names for the current integration test */
+TRAN_DSN = 'Z73968.BANK.TXNTEST'
+SETT_DSN = 'Z73968.BANK.SETTEST'
 
 EXPECTED_LENGTH = 38
 FAIL = 0
 
-/* Validate both input datasets */
 CALL CHECK_DATASET TRAN_DSN, 'TRANSACTION'
 CALL CHECK_DATASET SETT_DSN, 'SETTLEMENT'
 
+SAY '========================================'
+
 IF FAIL = 1 THEN DO
-    SAY '========================================'
     SAY 'VALIDATION FAILED'
     EXIT 12
 END
 
-SAY '========================================'
 SAY 'VALIDATION SUCCESS'
 EXIT 0
 
@@ -38,12 +37,12 @@ CHECK_DATASET:
     SAY ''
     SAY 'Checking' LABEL 'dataset:' DSN
 
-    /* Check dataset existence using the LISTDSI REXX function */
-    DSI_RC = LISTDSI(DSN)
+    /* Check dataset status */
+    DSN_STATUS = SYSDSN("'"DSN"'")
 
-    IF DSI_RC <> 0 THEN DO
+    IF DSN_STATUS <> 'OK' THEN DO
         SAY 'FAIL:' LABEL 'dataset missing or inaccessible:' DSN
-        SAY 'LISTDSI return code:' DSI_RC
+        SAY 'SYSDSN status:' DSN_STATUS
         FAIL = 1
         RETURN
     END
@@ -54,14 +53,14 @@ CHECK_DATASET:
 
     /* Allocate dataset for reading */
     ADDRESS TSO "ALLOC FI("QUEUE_NAME") DA('"DSN"') SHR REUSE"
+    ALLOC_RC = RC
 
-    IF RC <> 0 THEN DO
-        SAY 'FAIL:' LABEL 'dataset allocation failed. RC=' RC
+    IF ALLOC_RC <> 0 THEN DO
+        SAY 'FAIL:' LABEL 'dataset allocation failed. RC=' ALLOC_RC
         FAIL = 1
         RETURN
     END
 
-    /* Initialize record stem */
     DROP REC.
     REC.0 = 0
 
@@ -100,7 +99,7 @@ CHECK_DATASET:
         END
     END
 
-    /* Release allocation even if reading fails */
+    /* Attempt to release the allocation */
     ADDRESS TSO "FREE FI("QUEUE_NAME")"
     FREE_RC = RC
 

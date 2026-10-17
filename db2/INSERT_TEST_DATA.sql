@@ -1,18 +1,86 @@
--- Test examples only; use only in an approved test schema/table.
--- Input 000050000 represents 500.00 (last two digits are cents).
+
+-- Mainframe Banking Transaction Reconciliation
+-- Sample data for testing RECON_RESULTS.
+-- Execute only in the approved project/test schema.
+--
+-- These are expected-result examples. They do not execute
+-- the COBOL reconciliation program.
+--
+-- Input amount format: nine digits, with two implied
+-- decimal places. For example, 000050000 = 500.00.
+
 INSERT INTO RECON_RESULTS
- (TXN_ID, ACCOUNT_ID, TRAN_AMOUNT, SETTLE_AMOUNT, STATUS, DETAILS)
- VALUES ('TXN0000001','ACCT000001',500.00,500.00,'MATCHED',
-         'Equal account and amount');
+(
+    TXN_ID,
+    ACCOUNT_ID,
+    TRAN_AMOUNT,
+    SETTLE_AMOUNT,
+    STATUS,
+    DETAILS
+)
+VALUES
+(
+    'TXN0000001',
+    'ACCT000001',
+    500.00,
+    500.00,
+    'MATCHED',
+    'Equal account and amount'
+);
+
 INSERT INTO RECON_RESULTS
- (TXN_ID, ACCOUNT_ID, TRAN_AMOUNT, SETTLE_AMOUNT, STATUS, DETAILS)
- VALUES ('TXN0000002','ACCT000002',750.00,700.00,'MISMATCHED',
-         'Amount differs');
+(
+    TXN_ID,
+    ACCOUNT_ID,
+    TRAN_AMOUNT,
+    SETTLE_AMOUNT,
+    STATUS,
+    DETAILS
+)
+VALUES
+(
+    'TXN0000002',
+    'ACCT000002',
+    750.00,
+    700.00,
+    'MISMATCHED',
+    'Amount differs'
+);
+
 INSERT INTO RECON_RESULTS
- (TXN_ID, ACCOUNT_ID, TRAN_AMOUNT, SETTLE_AMOUNT, STATUS, DETAILS)
- VALUES ('TXN0000003','ACCT000003',125.00,NULL,'MISSING_SETTLEMENT',
-         'Transaction only');
+(
+    TXN_ID,
+    ACCOUNT_ID,
+    TRAN_AMOUNT,
+    SETTLE_AMOUNT,
+    STATUS,
+    DETAILS
+)
+VALUES
+(
+    'TXN0000003',
+    'ACCT000003',
+    125.00,
+    NULL,
+    'MISSING_SETTLEMENT',
+    'Transaction only'
+);
+
 INSERT INTO RECON_RESULTS
- (TXN_ID, ACCOUNT_ID, TRAN_AMOUNT, SETTLE_AMOUNT, STATUS, DETAILS)
- VALUES ('TXN0000004','ACCT000004',NULL,125.00,'MISSING_TRANSACTION',
-         'Settlement only');
+(
+    TXN_ID,
+    ACCOUNT_ID,
+    TRAN_AMOUNT,
+    SETTLE_AMOUNT,
+    STATUS,
+    DETAILS
+)
+VALUES
+(
+    'TXN0000004',
+    'ACCT000004',
+    NULL,
+    125.00,
+    'MISSING_TRANSACTION',
+    'Settlement only'
+);

@@ -1,0 +1,78 @@
+//EODVAL   JOB ,MSGLEVEL=(2,0),CLASS=7
+//* TEST-CASE EOD GATE: expected counts for current 5-record normal fixture.
+//* Transaction and settlement inputs must each contain 5 records.
+//* COBOL must create all four output datasets, including empty exception files.
+//* For the 10,000-record baseline or other scenarios, revise the expected counts.
+//TXNCHK   EXEC PGM=ICETOOL
+//TOOLMSG  DD SYSOUT=*
+//DFSMSG   DD SYSOUT=*
+//TXNIN    DD DSN=Z73968.BANK.TXNSORT,DISP=SHR
+//TOOLIN   DD *
+  COUNT FROM(TXNIN) NOTEQUAL(5) RC8
+/*
+//SETCHK   EXEC PGM=ICETOOL
+//TOOLMSG  DD SYSOUT=*
+//DFSMSG   DD SYSOUT=*
+//SETIN    DD DSN=Z73968.BANK.SETSORT,DISP=SHR
+//TOOLIN   DD *
+  COUNT FROM(SETIN) NOTEQUAL(5) RC8
+/*
+//MATCHCHK EXEC PGM=ICETOOL
+//TOOLMSG  DD SYSOUT=*
+//DFSMSG   DD SYSOUT=*
+//MATCHIN  DD DSN=Z73968.BANK.MATCHED,DISP=SHR
+//TOOLIN   DD *
+  COUNT FROM(MATCHIN) NOTEQUAL(5) RC8
+/*
+//MISMCHK  EXEC PGM=ICETOOL
+//TOOLMSG  DD SYSOUT=*
+//DFSMSG   DD SYSOUT=*
+//MISM     DD DSN=Z73968.BANK.MISMATCH,DISP=SHR
+//TOOLIN   DD *
+  COUNT FROM(MISM) NOTEQUAL(0) RC8
+/*
+//TNMCHK   EXEC PGM=ICETOOL
+//TOOLMSG  DD SYSOUT=*
+//DFSMSG   DD SYSOUT=*
+//TNMISS   DD DSN=Z73968.BANK.TXNMISS,DISP=SHR
+//TOOLIN   DD *
+  COUNT FROM(TNMISS) NOTEQUAL(0) RC8
+/*
+//STMCHK   EXEC PGM=ICETOOL
+//TOOLMSG  DD SYSOUT=*
+//DFSMSG   DD SYSOUT=*
+//STMISS   DD DSN=Z73968.BANK.SETMISS,DISP=SHR
+//TOOLIN   DD *
+  COUNT FROM(STMISS) NOTEQUAL(0) RC8
+/*
+//* Publish the matched output only if every count check passes.
+//PUBOK    IF (TXNCHK.RC = 0 & SETCHK.RC = 0 &
+//            MATCHCHK.RC = 0 & MISMCHK.RC = 0 &
+//            TNMCHK.RC = 0 & STMCHK.RC = 0) THEN
+//FINALCP  EXEC PGM=IEBGENER
+//SYSUT1   DD DSN=Z73968.BANK.MATCHED,DISP=SHR
+//SYSUT2   DD DSN=Z73968.BANK.FINAL,
+//            DISP=(NEW,CATLG,DELETE),
+//            SPACE=(TRK,(1,1)),
+//            UNIT=SYSDA,
+//            DCB=(RECFM=FB,LRECL=38,BLKSIZE=0)
+//SYSPRINT DD SYSOUT=*
+//SYSIN    DD DUMMY
+//PUBEND   ENDIF
+//* On any failed count check, write a diagnostic marker; no FINAL is published.
+//EODFAIL  IF (TXNCHK.RC > 0 | SETCHK.RC > 0 |
+//             MATCHCHK.RC > 0 | MISMCHK.RC > 0 |
+//             TNMCHK.RC > 0 | STMCHK.RC > 0) THEN
+//ERRWRITE EXEC PGM=IEBGENER
+//SYSUT1   DD *
+EOD VALIDATION FAILED - FINAL OUTPUT NOT PUBLISHED
+Inspect ICETOOL TOOLMSG/DFSMSG for the count that failed.
+/*
+//SYSUT2   DD DSN=Z73968.BANK.EODERROR,
+//            DISP=(NEW,CATLG,DELETE),
+//            SPACE=(TRK,(1,1)),
+//            UNIT=SYSDA,
+//            DCB=(RECFM=FB,LRECL=80,BLKSIZE=0)
+//SYSPRINT DD SYSOUT=*
+//SYSIN    DD DUMMY
+//FAILEND  ENDIF

@@ -1,12 +1,20 @@
 //BANKMAST JOB ,MSGLEVEL=(2,0),CLASS=7
-//* INTEGRATION TEMPLATE FOR THE CURRENT 5-RECORD DUPLICATE/NORMAL TEST.
-//* Prerequisites before submission:
-//* 1. Z73968.BANK.REXXLIB(VALIDATE) exists and validates TXNSORT/SETSORT.
-//* 2. Z73968.BANK.LOAD contains the compiled COBOL load module RECONCIL.
-//* 3. RECONCIL uses DD names TRANIN, SETTIN, MATCHOUT, MISMOUT, TXNMISS,
-//*    SETMISS and writes 38-byte MATCHOUT plus 120-byte exception records.
-//* 4. Delete previously cataloged output datasets before re-running this job.
-//* This template is not ready to run until REXX/COBOL interfaces are implemented.
+//* PROFILE: SMOKE_DUPLICATE (current Z73968 test datasets).
+//* Known fixture: TXNTEST=7; TXNSORT=5 after key deduplication.
+//* Known fixture: SETTEST=5; SETSORT=5 (sort only; preserve duplicates).
+//* EOD PASS: TXNSORT=5, SETSORT=5, MATCHED=5, other outputs=0.
+//* This is NOT the 10,000-record volume profile.
+//* Before rerun, delete only cataloged intermediate/output datasets:
+//* TXNSORT, SETSORT, MATCHED, MISMATCH, TXNMISS, SETMISS, FINAL, EODERROR.
+//* Never delete TXNTEST or SETTEST when doing cleanup.
+//* REXX member VALIDATE must check TXNSORT and SETSORT (post-sort inputs).
+//* COBOL input DDs: TRANIN, SETTIN. Output DDs: MATCHOUT, MISMOUT,
+//* TXNMISS, SETMISS. MATCHOUT=FB/38; exception outputs=FB/120.
+//* RC contract: 0=clean; 4=business exceptions; >=8=technical failure.
+//* EOD runs for RC=0 or RC=4; FINAL requires RC=0 and passing counts.
+//* DB2 NOTE: PGM=RECONCIL below is file-only scaffolding. Once embedded
+//* SQL is added, use the site's DB2 precompile/build and DSN runtime/plan.
+//* Confirm the subsystem, plan, compiler PROC and DB2 libraries first.
 //TXNSORT  EXEC PGM=SORT
 //SYSOUT   DD SYSOUT=*
 //SORTIN   DD DSN=Z73968.BANK.TXNTEST,DISP=SHR
@@ -61,8 +69,7 @@
 //            SPACE=(TRK,(1,1)),
 //            UNIT=SYSDA,
 //            DCB=(RECFM=FB,LRECL=120,BLKSIZE=0)
-//RECONOK  IF (RECONCIL.RC = 0) THEN
-//* EOD count checks for the current 5-record happy-path fixture.
+//RECONOK  IF (RECONCIL.RC = 0 | RECONCIL.RC = 4) THEN
 //TXNCNT   EXEC PGM=ICETOOL
 //TOOLMSG  DD SYSOUT=*
 //DFSMSG   DD SYSOUT=*
@@ -94,20 +101,21 @@
 //TNMCT    EXEC PGM=ICETOOL
 //TOOLMSG  DD SYSOUT=*
 //DFSMSG   DD SYSOUT=*
-//TNMISS   DD DSN=Z73968.BANK.TXNMISS,DISP=SHR
+//TXNMISS  DD DSN=Z73968.BANK.TXNMISS,DISP=SHR
 //TOOLIN   DD *
-  COUNT FROM(TNMISS) NOTEQUAL(0) RC8
+  COUNT FROM(TXNMISS) NOTEQUAL(0) RC8
 /*
 //STMCT    EXEC PGM=ICETOOL
 //TOOLMSG  DD SYSOUT=*
 //DFSMSG   DD SYSOUT=*
-//STMISS   DD DSN=Z73968.BANK.SETMISS,DISP=SHR
+//SETMISS  DD DSN=Z73968.BANK.SETMISS,DISP=SHR
 //TOOLIN   DD *
-  COUNT FROM(STMISS) NOTEQUAL(0) RC8
+  COUNT FROM(SETMISS) NOTEQUAL(0) RC8
 /*
-//PUBOK    IF (TXNCNT.RC = 0 & SETCNT.RC = 0 &
-//            MATCHCT.RC = 0 & MISCT.RC = 0 &
-//            TNMCT.RC = 0 & STMCT.RC = 0) THEN
+//PUBOK    IF (RECONCIL.RC = 0 & TXNCNT.RC = 0 &
+//            SETCNT.RC = 0 & MATCHCT.RC = 0 &
+//            MISCT.RC = 0 & TNMCT.RC = 0 & STMCT.RC = 0)
+//            THEN
 //FINALCP  EXEC PGM=IEBGENER
 //SYSUT1   DD DSN=Z73968.BANK.MATCHED,DISP=SHR
 //SYSUT2   DD DSN=Z73968.BANK.FINAL,
@@ -118,13 +126,18 @@
 //SYSPRINT DD SYSOUT=*
 //SYSIN    DD DUMMY
 //PUBEND   ENDIF
-//EODFAIL  IF (TXNCNT.RC > 0 | SETCNT.RC > 0 |
-//             MATCHCT.RC > 0 | MISCT.RC > 0 |
-//             TNMCT.RC > 0 | STMCT.RC > 0) THEN
+//RECONEND ENDIF
+//REXXEND  ENDIF
+//SORTEND  ENDIF
+//* One common failure marker for sort, REXX, COBOL, EOD or publish errors.
+//EODFAIL  IF (TXNSORT.RC > 0 | SETSORT.RC > 0 | REXXVAL.RC > 0 |
+//            RECONCIL.RC > 0 | TXNCNT.RC > 0 | SETCNT.RC > 0 |
+//            MATCHCT.RC > 0 | MISCT.RC > 0 | TNMCT.RC > 0 |
+//            STMCT.RC > 0 | FINALCP.RC > 0) THEN
 //ERRWRITE EXEC PGM=IEBGENER
 //SYSUT1   DD *
-EOD VALIDATION FAILED - FINAL OUTPUT NOT PUBLISHED
-Inspect ICETOOL TOOLMSG/DFSMSG for the count that failed.
+BATCH/EOD FAILED - FINAL OUTPUT NOT PUBLISHED
+Inspect JES/SDSF and ICETOOL TOOLMSG/DFSMSG for the failure.
 /*
 //SYSUT2   DD DSN=Z73968.BANK.EODERROR,
 //            DISP=(NEW,CATLG,DELETE),
@@ -134,6 +147,3 @@ Inspect ICETOOL TOOLMSG/DFSMSG for the count that failed.
 //SYSPRINT DD SYSOUT=*
 //SYSIN    DD DUMMY
 //FAILEND  ENDIF
-//RECONEND ENDIF
-//REXXEND  ENDIF
-//SORTEND  ENDIF

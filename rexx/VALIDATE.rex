@@ -1,8 +1,10 @@
+
 /* REXX */
 /* Module: VALIDATE.rex */
-/* Purpose: Validate transaction and settlement datasets */
-/* Expected record length: 38 characters */
-/* Mainframe execution must be tested in the target TSO/REXX environment. */
+/* Purpose: Validate sorted reconciliation input datasets */
+/* Required inputs: TXNSORT and SETSORT */
+/* Requirements: Accessible, non-empty, 38-byte records */
+/* Return codes: 0 = success, 12 = validation/technical failure */
 
 ADDRESS TSO
 
@@ -10,9 +12,9 @@ SAY '========================================'
 SAY ' BANKING RECONCILIATION VALIDATION'
 SAY '========================================'
 
-/* Dataset names for the current integration test */
-TRAN_DSN = 'Z73968.BANK.TXNTEST'
-SETT_DSN = 'Z73968.BANK.SETTEST'
+/* Use the actual sorted dataset names for this test environment. */
+TRAN_DSN = 'Z73736.TXNSORT'
+SETT_DSN = 'Z73736.SETSORT'
 
 EXPECTED_LENGTH = 38
 FAIL = 0
@@ -22,12 +24,14 @@ CALL CHECK_DATASET SETT_DSN, 'SETTLEMENT'
 
 SAY '========================================'
 
-IF FAIL = 1 THEN DO
+IF FAIL <> 0 THEN DO
     SAY 'VALIDATION FAILED'
+    SAY 'RETURN CODE: 12'
     EXIT 12
 END
 
 SAY 'VALIDATION SUCCESS'
+SAY 'RETURN CODE: 0'
 EXIT 0
 
 
@@ -37,26 +41,26 @@ CHECK_DATASET:
     SAY ''
     SAY 'Checking' LABEL 'dataset:' DSN
 
-    /* Check dataset status */
+    /* Check whether the dataset is cataloged and accessible. */
     DSN_STATUS = SYSDSN("'"DSN"'")
 
     IF DSN_STATUS <> 'OK' THEN DO
-        SAY 'FAIL:' LABEL 'dataset missing or inaccessible:' DSN
+        SAY 'FAIL:' LABEL 'dataset missing or inaccessible.'
         SAY 'SYSDSN status:' DSN_STATUS
         FAIL = 1
         RETURN
     END
 
-    SAY 'PASS:' LABEL 'dataset exists.'
+    SAY 'PASS:' LABEL 'dataset is accessible.'
 
     QUEUE_NAME = 'VALQ'
 
-    /* Allocate dataset for reading */
+    /* Allocate the dataset for shared reading. */
     ADDRESS TSO "ALLOC FI("QUEUE_NAME") DA('"DSN"') SHR REUSE"
     ALLOC_RC = RC
 
     IF ALLOC_RC <> 0 THEN DO
-        SAY 'FAIL:' LABEL 'dataset allocation failed. RC=' ALLOC_RC
+        SAY 'FAIL:' LABEL 'allocation failed. RC=' ALLOC_RC
         FAIL = 1
         RETURN
     END
@@ -64,12 +68,12 @@ CHECK_DATASET:
     DROP REC.
     REC.0 = 0
 
-    /* Read dataset records */
+    /* Read all records and close the input allocation. */
     ADDRESS TSO "EXECIO * DISKR "QUEUE_NAME" (STEM REC. FINIS"
     READ_RC = RC
 
     IF READ_RC <> 0 THEN DO
-        SAY 'FAIL:' LABEL 'dataset read failed. RC=' READ_RC
+        SAY 'FAIL:' LABEL 'read failed. RC=' READ_RC
         FAIL = 1
     END
     ELSE IF REC.0 = 0 THEN DO
@@ -99,12 +103,12 @@ CHECK_DATASET:
         END
     END
 
-    /* Attempt to release the allocation */
+    /* Release the allocation and report any failure. */
     ADDRESS TSO "FREE FI("QUEUE_NAME")"
     FREE_RC = RC
 
     IF FREE_RC <> 0 THEN DO
-        SAY 'FAIL:' LABEL 'dataset deallocation failed. RC=' FREE_RC
+        SAY 'FAIL:' LABEL 'deallocation failed. RC=' FREE_RC
         FAIL = 1
     END
 

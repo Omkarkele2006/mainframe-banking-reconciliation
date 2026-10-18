@@ -1,8 +1,10 @@
 //EODVAL   JOB ,MSGLEVEL=(2,0),CLASS=7
-//* TEST-CASE EOD GATE: expected counts for current 5-record normal fixture.
-//* Transaction and settlement inputs must each contain 5 records.
-//* COBOL must create all four output datasets, including empty exception files.
-//* For the 10,000-record baseline or other scenarios, revise the expected counts.
+//* Standalone EOD gate for the SMOKE_DUPLICATE profile only.
+//* Preconditions: COBOL completed with RC=0 and created all four outputs.
+//* Expected: TXNSORT=5, SETSORT=5, MATCHED=5, MISMATCH=0,
+//* TXNMISS=0, SETMISS=0. A passing gate publishes FINAL only.
+//* This is not the 10,000-record volume profile.
+//* Before rerun, remove only prior outputs: FINAL and EODERROR.
 //TXNCHK   EXEC PGM=ICETOOL
 //TOOLMSG  DD SYSOUT=*
 //DFSMSG   DD SYSOUT=*
@@ -34,18 +36,17 @@
 //TNMCHK   EXEC PGM=ICETOOL
 //TOOLMSG  DD SYSOUT=*
 //DFSMSG   DD SYSOUT=*
-//TNMISS   DD DSN=Z73968.BANK.TXNMISS,DISP=SHR
+//TXNMISS  DD DSN=Z73968.BANK.TXNMISS,DISP=SHR
 //TOOLIN   DD *
-  COUNT FROM(TNMISS) NOTEQUAL(0) RC8
+  COUNT FROM(TXNMISS) NOTEQUAL(0) RC8
 /*
 //STMCHK   EXEC PGM=ICETOOL
 //TOOLMSG  DD SYSOUT=*
 //DFSMSG   DD SYSOUT=*
-//STMISS   DD DSN=Z73968.BANK.SETMISS,DISP=SHR
+//SETMISS  DD DSN=Z73968.BANK.SETMISS,DISP=SHR
 //TOOLIN   DD *
-  COUNT FROM(STMISS) NOTEQUAL(0) RC8
+  COUNT FROM(SETMISS) NOTEQUAL(0) RC8
 /*
-//* Publish the matched output only if every count check passes.
 //PUBOK    IF (TXNCHK.RC = 0 & SETCHK.RC = 0 &
 //            MATCHCHK.RC = 0 & MISMCHK.RC = 0 &
 //            TNMCHK.RC = 0 & STMCHK.RC = 0) THEN
@@ -59,10 +60,9 @@
 //SYSPRINT DD SYSOUT=*
 //SYSIN    DD DUMMY
 //PUBEND   ENDIF
-//* On any failed count check, write a diagnostic marker; no FINAL is published.
-//EODFAIL  IF (TXNCHK.RC > 0 | SETCHK.RC > 0 |
-//             MATCHCHK.RC > 0 | MISMCHK.RC > 0 |
-//             TNMCHK.RC > 0 | STMCHK.RC > 0) THEN
+//EODFAIL  IF (TXNCHK.RC > 0 | SETCHK.RC > 0 | MATCHCHK.RC > 0 |
+//            MISMCHK.RC > 0 | TNMCHK.RC > 0 | STMCHK.RC > 0 |
+//            FINALCP.RC > 0) THEN
 //ERRWRITE EXEC PGM=IEBGENER
 //SYSUT1   DD *
 EOD VALIDATION FAILED - FINAL OUTPUT NOT PUBLISHED

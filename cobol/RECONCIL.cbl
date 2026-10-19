@@ -1,5 +1,6 @@
        IDENTIFICATION DIVISION.
        PROGRAM-ID. RECONCIL.
+
        ENVIRONMENT DIVISION.
        INPUT-OUTPUT SECTION.
        FILE-CONTROL.
@@ -9,9 +10,19 @@
            SELECT SETTLE-FILE ASSIGN TO SETTIN
                ORGANIZATION IS SEQUENTIAL
                FILE STATUS IS WS-SFS.
-           SELECT REPORT-FILE ASSIGN TO REPORTOUT
+           SELECT MATCH-FILE ASSIGN TO MATCHOUT
                ORGANIZATION IS SEQUENTIAL
-               FILE STATUS IS WS-OFS.
+               FILE STATUS IS WS-MFS.
+           SELECT MISMATCH-FILE ASSIGN TO MISMOUT
+               ORGANIZATION IS SEQUENTIAL
+               FILE STATUS IS WS-MISFS.
+           SELECT TXNMISS-FILE ASSIGN TO TXNMISS
+               ORGANIZATION IS SEQUENTIAL
+               FILE STATUS IS WS-TMFS.
+           SELECT SETMISS-FILE ASSIGN TO SETMISS
+               ORGANIZATION IS SEQUENTIAL
+               FILE STATUS IS WS-SMFS.
+
        DATA DIVISION.
        FILE SECTION.
        FD  TRAN-FILE
@@ -22,6 +33,7 @@
            05 TRAN-AMOUNT      PIC X(9).
            05 TRAN-DATE        PIC X(8).
            05 TRAN-STATUS      PIC X.
+
        FD  SETTLE-FILE
            RECORD CONTAINS 38 CHARACTERS.
        01  SETTLE-REC.
@@ -30,36 +42,55 @@
            05 SETTLE-AMOUNT    PIC X(9).
            05 SETTLE-DATE      PIC X(8).
            05 SETTLE-STATUS    PIC X.
-       FD  REPORT-FILE
+
+       FD  MATCH-FILE
+           RECORD CONTAINS 38 CHARACTERS.
+       01  MATCH-REC           PIC X(38).
+
+       FD  MISMATCH-FILE
            RECORD CONTAINS 120 CHARACTERS.
-       01  REPORT-REC           PIC X(120).
+       01  MISMATCH-REC        PIC X(120).
+
+       FD  TXNMISS-FILE
+           RECORD CONTAINS 120 CHARACTERS.
+       01  TXNMISS-REC         PIC X(120).
+
+       FD  SETMISS-FILE
+           RECORD CONTAINS 120 CHARACTERS.
+       01  SETMISS-REC         PIC X(120).
+
        WORKING-STORAGE SECTION.
-       01  WS-TFS               PIC XX VALUE SPACES.
-       01  WS-SFS               PIC XX VALUE SPACES.
-       01  WS-OFS               PIC XX VALUE SPACES.
-       01  WS-T-OPEN             PIC X VALUE "N".
-       01  WS-S-OPEN             PIC X VALUE "N".
-       01  WS-O-OPEN             PIC X VALUE "N".
-       01  WS-TEOF               PIC X VALUE "N".
-       01  WS-SEOF               PIC X VALUE "N".
-       01  WS-RC                 PIC 99 VALUE 0.
-       01  WS-COUNT-T            PIC 9(7) VALUE 0.
-       01  WS-COUNT-S            PIC 9(7) VALUE 0.
-       01  WS-MATCH              PIC 9(7) VALUE 0.
-       01  WS-MISMATCH           PIC 9(7) VALUE 0.
-       01  WS-TONLY              PIC 9(7) VALUE 0.
-       01  WS-SONLY              PIC 9(7) VALUE 0.
-       01  WS-TA                 PIC 9(7)V99 VALUE ZERO.
-       01  WS-SA                 PIC 9(7)V99 VALUE ZERO.
-       01  WS-RESULT             PIC X(24).
-       01  WS-DETAIL             PIC X(40).
-       01  WS-LINE               PIC X(120).
+       01  WS-TFS              PIC XX VALUE SPACES.
+       01  WS-SFS              PIC XX VALUE SPACES.
+       01  WS-MFS              PIC XX VALUE SPACES.
+       01  WS-MISFS            PIC XX VALUE SPACES.
+       01  WS-TMFS             PIC XX VALUE SPACES.
+       01  WS-SMFS             PIC XX VALUE SPACES.
+
+       01  WS-T-OPEN           PIC X VALUE "N".
+       01  WS-S-OPEN           PIC X VALUE "N".
+       01  WS-M-OPEN           PIC X VALUE "N".
+       01  WS-MIS-OPEN         PIC X VALUE "N".
+       01  WS-TM-OPEN          PIC X VALUE "N".
+       01  WS-SM-OPEN          PIC X VALUE "N".
+
+       01  WS-TEOF             PIC X VALUE "N".
+       01  WS-SEOF             PIC X VALUE "N".
+       01  WS-RC               PIC 99 VALUE 0.
+
+       01  WS-COUNT-T          PIC 9(7) VALUE 0.
+       01  WS-COUNT-S          PIC 9(7) VALUE 0.
+       01  WS-MATCH            PIC 9(7) VALUE 0.
+       01  WS-MISMATCH         PIC 9(7) VALUE 0.
+       01  WS-TONLY            PIC 9(7) VALUE 0.
+       01  WS-SONLY            PIC 9(7) VALUE 0.
+
        PROCEDURE DIVISION.
        MAIN.
            OPEN INPUT TRAN-FILE
            IF WS-TFS NOT = "00"
                DISPLAY "OPEN TRANIN FAILED: " WS-TFS
-               MOVE 12 TO WS-RC
+               MOVE 8 TO WS-RC
                PERFORM CLEANUP
                MOVE WS-RC TO RETURN-CODE
                GOBACK
@@ -69,88 +100,103 @@
            OPEN INPUT SETTLE-FILE
            IF WS-SFS NOT = "00"
                DISPLAY "OPEN SETTIN FAILED: " WS-SFS
-               MOVE 12 TO WS-RC
+               MOVE 8 TO WS-RC
                PERFORM CLEANUP
                MOVE WS-RC TO RETURN-CODE
                GOBACK
            END-IF
            MOVE "Y" TO WS-S-OPEN
 
-           OPEN OUTPUT REPORT-FILE
-           IF WS-OFS NOT = "00"
-               DISPLAY "OPEN REPORTOUT FAILED: " WS-OFS
-               MOVE 12 TO WS-RC
+           OPEN OUTPUT MATCH-FILE
+           IF WS-MFS NOT = "00"
+               DISPLAY "OPEN MATCHOUT FAILED: " WS-MFS
+               MOVE 8 TO WS-RC
                PERFORM CLEANUP
                MOVE WS-RC TO RETURN-CODE
                GOBACK
            END-IF
-           MOVE "Y" TO WS-O-OPEN
+           MOVE "Y" TO WS-M-OPEN
+
+           OPEN OUTPUT MISMATCH-FILE
+           IF WS-MISFS NOT = "00"
+               DISPLAY "OPEN MISMOUT FAILED: " WS-MISFS
+               MOVE 8 TO WS-RC
+               PERFORM CLEANUP
+               MOVE WS-RC TO RETURN-CODE
+               GOBACK
+           END-IF
+           MOVE "Y" TO WS-MIS-OPEN
+
+           OPEN OUTPUT TXNMISS-FILE
+           IF WS-TMFS NOT = "00"
+               DISPLAY "OPEN TXNMISS FAILED: " WS-TMFS
+               MOVE 8 TO WS-RC
+               PERFORM CLEANUP
+               MOVE WS-RC TO RETURN-CODE
+               GOBACK
+           END-IF
+           MOVE "Y" TO WS-TM-OPEN
+
+           OPEN OUTPUT SETMISS-FILE
+           IF WS-SMFS NOT = "00"
+               DISPLAY "OPEN SETMISS FAILED: " WS-SMFS
+               MOVE 8 TO WS-RC
+               PERFORM CLEANUP
+               MOVE WS-RC TO RETURN-CODE
+               GOBACK
+           END-IF
+           MOVE "Y" TO WS-SM-OPEN
 
            PERFORM READ-T
            PERFORM READ-S
 
            PERFORM UNTIL WS-TEOF = "Y" AND WS-SEOF = "Y"
-               IF WS-RC = 12
+               IF WS-RC >= 8
                    EXIT PERFORM
                END-IF
                EVALUATE TRUE
                  WHEN WS-TEOF = "Y"
-                   MOVE "MISSING_TRANSACTION" TO WS-RESULT
-                   MOVE "Settlement only" TO WS-DETAIL
                    PERFORM WRITE-S-ONLY
-                   IF WS-RC NOT = 12
+                   IF WS-RC < 8
                        PERFORM READ-S
                    END-IF
                  WHEN WS-SEOF = "Y"
-                   MOVE "MISSING_SETTLEMENT" TO WS-RESULT
-                   MOVE "Transaction only" TO WS-DETAIL
                    PERFORM WRITE-T-ONLY
-                   IF WS-RC NOT = 12
+                   IF WS-RC < 8
                        PERFORM READ-T
                    END-IF
                  WHEN TRAN-ID = SETTLE-ID
                    PERFORM COMPARE-RECORDS
-                   IF WS-RC NOT = 12
+                   IF WS-RC < 8
                        PERFORM READ-T
+                   END-IF
+                   IF WS-RC < 8
                        PERFORM READ-S
                    END-IF
                  WHEN TRAN-ID < SETTLE-ID
-                   MOVE "MISSING_SETTLEMENT" TO WS-RESULT
-                   MOVE "Transaction only" TO WS-DETAIL
                    PERFORM WRITE-T-ONLY
-                   IF WS-RC NOT = 12
+                   IF WS-RC < 8
                        PERFORM READ-T
                    END-IF
                  WHEN OTHER
-                   MOVE "MISSING_TRANSACTION" TO WS-RESULT
-                   MOVE "Settlement only" TO WS-DETAIL
                    PERFORM WRITE-S-ONLY
-                   IF WS-RC NOT = 12
+                   IF WS-RC < 8
                        PERFORM READ-S
                    END-IF
                END-EVALUATE
            END-PERFORM
 
-           IF WS-RC NOT = 12
-               MOVE SPACES TO REPORT-REC
-               STRING "SUMMARY T=" WS-COUNT-T
-                 " S=" WS-COUNT-S
-                 " MATCHED=" WS-MATCH
-                 " MISMATCHED=" WS-MISMATCH
-                 " MISSING_SETTLEMENT=" WS-TONLY
-                 " MISSING_TRANSACTION=" WS-SONLY
-                 DELIMITED BY SIZE INTO REPORT-REC
-               END-STRING
-               WRITE REPORT-REC
-               IF WS-OFS NOT = "00"
-                   DISPLAY "SUMMARY WRITE FAILED: " WS-OFS
-                   MOVE 12 TO WS-RC
-               END-IF
-           END-IF
-
            PERFORM CLEANUP
-           IF WS-RC = 0 AND
-              (WS-MISMATCH > 0 OR WS-TONLY > 0 OR WS-SONLY > 0)
+
+           DISPLAY "TRANSACTION INPUT COUNT: " WS-COUNT-T
+           DISPLAY "SETTLEMENT INPUT COUNT:  " WS-COUNT-S
+           DISPLAY "MATCHED COUNT:           " WS-MATCH
+           DISPLAY "MISMATCHED COUNT:        " WS-MISMATCH
+           DISPLAY "TRANSACTION-ONLY COUNT:  " WS-TONLY
+           DISPLAY "SETTLEMENT-ONLY COUNT:   " WS-SONLY
+
+           IF WS-RC < 8 AND
+               (WS-MISMATCH > 0 OR WS-TONLY > 0 OR WS-SONLY > 0)
                MOVE 4 TO WS-RC
            END-IF
            MOVE WS-RC TO RETURN-CODE
@@ -158,102 +204,120 @@
 
        READ-T.
            READ TRAN-FILE
-             AT END
-               MOVE "Y" TO WS-TEOF
-             NOT AT END
-               IF WS-TFS = "00"
-                   ADD 1 TO WS-COUNT-T
-               ELSE
-                   DISPLAY "READ TRANIN FAILED: " WS-TFS
-                   MOVE 12 TO WS-RC
-               END-IF
+               AT END
+                   MOVE "Y" TO WS-TEOF
+               NOT AT END
+                   IF WS-TFS = "00"
+                       ADD 1 TO WS-COUNT-T
+                   ELSE
+                       DISPLAY "READ TRANIN FAILED: " WS-TFS
+                       MOVE 8 TO WS-RC
+                   END-IF
            END-READ
            IF WS-TFS NOT = "00" AND WS-TFS NOT = "10"
                DISPLAY "READ TRANIN FAILED: " WS-TFS
-               MOVE 12 TO WS-RC
+               MOVE 8 TO WS-RC
            END-IF.
 
        READ-S.
            READ SETTLE-FILE
-             AT END
-               MOVE "Y" TO WS-SEOF
-             NOT AT END
-               IF WS-SFS = "00"
-                   ADD 1 TO WS-COUNT-S
-               ELSE
-                   DISPLAY "READ SETTIN FAILED: " WS-SFS
-                   MOVE 12 TO WS-RC
-               END-IF
+               AT END
+                   MOVE "Y" TO WS-SEOF
+               NOT AT END
+                   IF WS-SFS = "00"
+                       ADD 1 TO WS-COUNT-S
+                   ELSE
+                       DISPLAY "READ SETTIN FAILED: " WS-SFS
+                       MOVE 8 TO WS-RC
+                   END-IF
            END-READ
            IF WS-SFS NOT = "00" AND WS-SFS NOT = "10"
                DISPLAY "READ SETTIN FAILED: " WS-SFS
-               MOVE 12 TO WS-RC
+               MOVE 8 TO WS-RC
+           END-IF.
+
+       CHECK-AMOUNTS.
+           IF TRAN-AMOUNT IS NOT NUMERIC
+               DISPLAY "INVALID TRANSACTION AMOUNT ID=" TRAN-ID
+               MOVE 8 TO WS-RC
+           END-IF
+           IF SETTLE-AMOUNT IS NOT NUMERIC
+               DISPLAY "INVALID SETTLEMENT AMOUNT ID=" SETTLE-ID
+               MOVE 8 TO WS-RC
            END-IF.
 
        COMPARE-RECORDS.
-           IF TRAN-AMOUNT IS NOT NUMERIC OR
-              SETTLE-AMOUNT IS NOT NUMERIC
-               MOVE "INVALID_AMOUNT" TO WS-RESULT
-               MOVE "Nonnumeric amount in input" TO WS-DETAIL
-               MOVE 12 TO WS-RC
-           ELSE
-               COMPUTE WS-TA =
-                   FUNCTION NUMVAL(TRAN-AMOUNT) / 100
-               COMPUTE WS-SA =
-                   FUNCTION NUMVAL(SETTLE-AMOUNT) / 100
-               IF TRAN-ACCOUNT = SETTLE-ACCOUNT
-                  AND WS-TA = WS-SA
-                   MOVE "MATCHED" TO WS-RESULT
-                   MOVE "Account and amount agree" TO WS-DETAIL
-                   ADD 1 TO WS-MATCH
+           PERFORM CHECK-AMOUNTS
+           IF WS-RC >= 8
+               EXIT PARAGRAPH
+           END-IF
+
+           IF TRAN-ACCOUNT = SETTLE-ACCOUNT AND
+               TRAN-AMOUNT = SETTLE-AMOUNT
+               MOVE TRAN-REC TO MATCH-REC
+               WRITE MATCH-REC
+               IF WS-MFS NOT = "00"
+                   DISPLAY "WRITE MATCHOUT FAILED: " WS-MFS
+                   MOVE 8 TO WS-RC
                ELSE
-                   MOVE "MISMATCHED" TO WS-RESULT
-                   MOVE "Account or amount differs" TO WS-DETAIL
+                   ADD 1 TO WS-MATCH
+               END-IF
+           ELSE
+               MOVE SPACES TO MISMATCH-REC
+               STRING
+                   "ID=" TRAN-ID
+                   " T-ACCT=" TRAN-ACCOUNT
+                   " S-ACCT=" SETTLE-ACCOUNT
+                   " T-AMT=" TRAN-AMOUNT
+                   " S-AMT=" SETTLE-AMOUNT
+                   DELIMITED BY SIZE
+                   INTO MISMATCH-REC
+               END-STRING
+               WRITE MISMATCH-REC
+               IF WS-MISFS NOT = "00"
+                   DISPLAY "WRITE MISMOUT FAILED: " WS-MISFS
+                   MOVE 8 TO WS-RC
+               ELSE
                    ADD 1 TO WS-MISMATCH
                END-IF
-           END-IF
-           MOVE SPACES TO REPORT-REC
-           STRING "ID=" TRAN-ID
-             " RESULT=" FUNCTION TRIM(WS-RESULT)
-             " TXN-AMT=" TRAN-AMOUNT
-             " SETTLE-AMT=" SETTLE-AMOUNT
-             " DETAIL=" FUNCTION TRIM(WS-DETAIL)
-             DELIMITED BY SIZE INTO REPORT-REC
-           END-STRING
-           WRITE REPORT-REC
-           IF WS-OFS NOT = "00"
-               DISPLAY "REPORT WRITE FAILED: " WS-OFS
-               MOVE 12 TO WS-RC
            END-IF.
 
        WRITE-T-ONLY.
-           ADD 1 TO WS-TONLY
-           MOVE SPACES TO REPORT-REC
+           IF TRAN-AMOUNT IS NOT NUMERIC
+               DISPLAY "INVALID TRANSACTION AMOUNT ID=" TRAN-ID
+               MOVE 8 TO WS-RC
+               EXIT PARAGRAPH
+           END-IF
+           MOVE SPACES TO TXNMISS-REC
            STRING "ID=" TRAN-ID
-             " RESULT=" FUNCTION TRIM(WS-RESULT)
-             " TXN-AMT=" TRAN-AMOUNT
-             " DETAIL=" FUNCTION TRIM(WS-DETAIL)
-             DELIMITED BY SIZE INTO REPORT-REC
+               " STATUS=MISSING_SETTLEMENT"
+               DELIMITED BY SIZE INTO TXNMISS-REC
            END-STRING
-           WRITE REPORT-REC
-           IF WS-OFS NOT = "00"
-               DISPLAY "REPORT WRITE FAILED: " WS-OFS
-               MOVE 12 TO WS-RC
+           WRITE TXNMISS-REC
+           IF WS-TMFS NOT = "00"
+               DISPLAY "WRITE TXNMISS FAILED: " WS-TMFS
+               MOVE 8 TO WS-RC
+           ELSE
+               ADD 1 TO WS-TONLY
            END-IF.
 
        WRITE-S-ONLY.
-           ADD 1 TO WS-SONLY
-           MOVE SPACES TO REPORT-REC
+           IF SETTLE-AMOUNT IS NOT NUMERIC
+               DISPLAY "INVALID SETTLEMENT AMOUNT ID=" SETTLE-ID
+               MOVE 8 TO WS-RC
+               EXIT PARAGRAPH
+           END-IF
+           MOVE SPACES TO SETMISS-REC
            STRING "ID=" SETTLE-ID
-             " RESULT=" FUNCTION TRIM(WS-RESULT)
-             " SETTLE-AMT=" SETTLE-AMOUNT
-             " DETAIL=" FUNCTION TRIM(WS-DETAIL)
-             DELIMITED BY SIZE INTO REPORT-REC
+               " STATUS=MISSING_TRANSACTION"
+               DELIMITED BY SIZE INTO SETMISS-REC
            END-STRING
-           WRITE REPORT-REC
-           IF WS-OFS NOT = "00"
-               DISPLAY "REPORT WRITE FAILED: " WS-OFS
-               MOVE 12 TO WS-RC
+           WRITE SETMISS-REC
+           IF WS-SMFS NOT = "00"
+               DISPLAY "WRITE SETMISS FAILED: " WS-SMFS
+               MOVE 8 TO WS-RC
+           ELSE
+               ADD 1 TO WS-SONLY
            END-IF.
 
        CLEANUP.
@@ -262,7 +326,7 @@
                MOVE "N" TO WS-T-OPEN
                IF WS-TFS NOT = "00"
                    DISPLAY "CLOSE TRANIN FAILED: " WS-TFS
-                   MOVE 12 TO WS-RC
+                   MOVE 8 TO WS-RC
                END-IF
            END-IF
            IF WS-S-OPEN = "Y"
@@ -270,14 +334,38 @@
                MOVE "N" TO WS-S-OPEN
                IF WS-SFS NOT = "00"
                    DISPLAY "CLOSE SETTIN FAILED: " WS-SFS
-                   MOVE 12 TO WS-RC
+                   MOVE 8 TO WS-RC
                END-IF
            END-IF
-           IF WS-O-OPEN = "Y"
-               CLOSE REPORT-FILE
-               MOVE "N" TO WS-O-OPEN
-               IF WS-OFS NOT = "00"
-                   DISPLAY "CLOSE REPORTOUT FAILED: " WS-OFS
-                   MOVE 12 TO WS-RC
+           IF WS-M-OPEN = "Y"
+               CLOSE MATCH-FILE
+               MOVE "N" TO WS-M-OPEN
+               IF WS-MFS NOT = "00"
+                   DISPLAY "CLOSE MATCHOUT FAILED: " WS-MFS
+                   MOVE 8 TO WS-RC
+               END-IF
+           END-IF
+           IF WS-MIS-OPEN = "Y"
+               CLOSE MISMATCH-FILE
+               MOVE "N" TO WS-MIS-OPEN
+               IF WS-MISFS NOT = "00"
+                   DISPLAY "CLOSE MISMOUT FAILED: " WS-MISFS
+                   MOVE 8 TO WS-RC
+               END-IF
+           END-IF
+           IF WS-TM-OPEN = "Y"
+               CLOSE TXNMISS-FILE
+               MOVE "N" TO WS-TM-OPEN
+               IF WS-TMFS NOT = "00"
+                   DISPLAY "CLOSE TXNMISS FAILED: " WS-TMFS
+                   MOVE 8 TO WS-RC
+               END-IF
+           END-IF
+           IF WS-SM-OPEN = "Y"
+               CLOSE SETMISS-FILE
+               MOVE "N" TO WS-SM-OPEN
+               IF WS-SMFS NOT = "00"
+                   DISPLAY "CLOSE SETMISS FAILED: " WS-SMFS
+                   MOVE 8 TO WS-RC
                END-IF
            END-IF.

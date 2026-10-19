@@ -1,19 +1,18 @@
-
 -- Mainframe Banking Transaction Reconciliation
 -- Db2 result table.
 --
 -- Before execution:
 -- 1. Confirm the correct Db2 subsystem with Om.
 -- 2. Confirm the correct schema qualifier.
--- 3. Run this only in the approved project/test schema.
+-- 3. Run only in the approved project/test schema.
 --
--- Input amount format:
--- The input file contains nine digits with two implied decimal places.
--- Example: 000050000 represents 500.00.
--- Store the converted value in DECIMAL(13,2).
+-- RUN_ID identifies a reconciliation run.
+-- TXN_ID identifies a transaction within that run.
+-- Embedded SQL and Db2 runtime integration remain pending.
 
 CREATE TABLE RECON_RESULTS
 (
+    RUN_ID          VARCHAR(32) NOT NULL,
     TXN_ID          CHAR(10) NOT NULL,
     ACCOUNT_ID      CHAR(10),
     TRAN_AMOUNT     DECIMAL(13,2),
@@ -27,5 +26,5 @@ CREATE TABLE RECON_RESULTS
     RUN_TIMESTAMP   TIMESTAMP NOT NULL
                     WITH DEFAULT CURRENT TIMESTAMP,
 
-    PRIMARY KEY (TXN_ID)
+    PRIMARY KEY (RUN_ID, TXN_ID)
 );

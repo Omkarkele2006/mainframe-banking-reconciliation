@@ -1,18 +1,17 @@
-
-# Read This First
+# Kartik Review Fix Notes
 
 ## 1. What Is Included
 
-- `cobol/RECONCIL.cbl`: Fixed-format COBOL file-merge and report-generation baseline using 38-byte input records.
+- `cobol/RECONCIL.cbl`: Fixed-format COBOL reconciliation baseline that merges sorted transaction and settlement records.
 - `db2/CREATE_TABLES.sql`: Db2 reconciliation result-table definition.
-- `db2/INSERT_TEST_DATA.sql`: Example rows for the four reconciliation outcomes.
-- `db2/QUERIES.sql`: Queries for viewing results, counting statuses, and identifying exceptions.
+- `db2/INSERT_TEST_DATA.sql`: Illustrative rows for the four reconciliation outcomes.
+- `db2/QUERIES.sql`: Queries for reviewing results, counting statuses, and identifying exceptions.
 
-**Important:** This package is not evidence of a successful compilation or execution. The COBOL program must be compiled and tested using the team's target z/OS environment.
+**Implementation status:** The file-based COBOL reconciliation baseline is prepared for target-environment review. Successful compilation and execution have not yet been verified. Embedded SQL and Db2 build/runtime integration remain pending.
 
-## 2. Input Dataset Layout
+## 2. Input Record Layout
 
-Both input datasets use the following record format:
+Both input datasets use:
 
 - `RECFM=FB`
 - `LRECL=38`
@@ -21,57 +20,83 @@ Both input datasets use the following record format:
 |---|---|---|
 | 1–10 | `TXN_ID` | 10 characters |
 | 11–20 | `ACCOUNT_ID` | 10 characters |
-| 21–29 | `AMOUNT` | 9 digits, with two implied decimal places |
+| 21–29 | `AMOUNT` | 9 numeric digits with two implied decimal places |
 | 30–37 | Date | `YYYYMMDD` |
 | 38 | Status | One character |
 
-Example: `000050000` represents `500.00`. The COBOL program converts the numeric amount by dividing it by 100.
+Example: `000050000` represents `500.00`.
 
-## 3. Required JCL DD Names
+The current COBOL logic validates and compares the fixed-width amount strings. It does not convert them into decimal values. Date and status are not compared by the current reconciliation scope.
 
-| DD name | Dataset or purpose |
+Both input datasets must be sorted in ascending order by `TXN_ID` before the merge.
+
+## 3. Required Input and Output Files
+
+### Input DD names
+
+| DD name | Purpose |
 |---|---|
-| `TRANIN` | `Z73968.BANK.TXNTEST` |
-| `SETTIN` | `Z73968.BANK.SETTEST` |
-| `REPORTOUT` | Output report dataset with `RECFM=FB` and `LRECL=120` |
+| `TRANIN` | Sorted transaction input (`TXNSORT`) |
+| `SETTIN` | Sorted settlement input (`SETSORT`) |
 
-Both input datasets must be sorted in ascending order by columns 1–10 (`TXN_ID`) before running the merge.
+### Output DD names
 
-The current implementation does not define a duplicate-transaction-ID policy. Confirm the expected behavior with Om before finalizing the implementation.
+| DD name | Purpose | Record format |
+|---|---|---|
+| `MATCHOUT` | Matched transaction records | `FB`, `LRECL=38` |
+| `MISMOUT` | Account/amount mismatch diagnostics | `FB`, `LRECL=120` |
+| `TXNMISS` | Transactions without settlements | `FB`, `LRECL=120` |
+| `SETMISS` | Settlements without transactions | `FB`, `LRECL=120` |
 
-## 4. Intended Return Codes
+The four output datasets must be allocated with the corresponding record lengths. Empty exception outputs must still be created when required by the job setup.
 
-| Return code | Intended meaning |
+Duplicate transaction records are expected to be removed by the upstream sorting/deduplication step. Conflicting duplicate IDs and duplicate settlements remain outside the current defined scope and require an agreed business rule.
+
+## 4. Return Codes
+
+| Return code | Meaning |
 |---|---|
-| `0` | Reconciliation completed without exceptions |
-| `4` | Reconciliation completed, but mismatches or missing IDs were found |
-| `12` | File-handling error or invalid amount |
+| `0` | Reconciliation completed without business exceptions |
+| `4` | Reconciliation completed with business exceptions |
+| `8+` | Technical failure, such as a file-processing error |
 
-These are intended return codes and must be verified through actual execution.
+These are the intended return-code meanings in the current implementation. They have not yet been confirmed by a successful target-environment execution.
 
-## 5. Db2 Integration Status
+## 5. Amount Handling
 
-The current COBOL program generates a report file. It does **not** contain embedded `EXEC SQL` statements to insert reconciliation outcomes into Db2.
+The input amount is represented as nine numeric characters with two implied decimal places. For example, `000050000` represents `500.00`.
 
-The SQL scripts separately define the result table, provide example data, and query reconciliation results.
+The current COBOL program validates that the amount field is numeric and compares the fixed-width amount strings when transaction and settlement IDs match. Because the validated fields have the same fixed width and numeric representation, string equality is used for the comparison.
 
-If the acceptance criteria require the COBOL program itself to write results to Db2, additional integration is required. This includes the appropriate Db2 precompilation, compilation, binding, and execution process in the team's environment.
+Conversion to a Db2 `DECIMAL(13,2)` value, if required by the database integration, must be implemented and validated as part of the subsequent Db2 integration work.
 
-Do not treat Db2 integration as complete until it has been implemented and tested.
+## 6. Db2 Schema and Integration Status
 
-## 6. Before Compilation and Execution
+The Db2 SQL scripts define a reconciliation result table, illustrative expected-result rows, and queries for reviewing stored results. The result-table design uses `RUN_ID` together with `TXN_ID` as a composite key so the same transaction ID can be retained across separate reconciliation runs.
 
-1. Confirm the team's compile JCL procedure, COBOL source-format setting, compiler version, and expected output DD name with Om.
-2. Confirm the approved Db2 subsystem and schema qualifier before running SQL scripts.
-3. Use approved test datasets. Do not overwrite the shared input datasets.
-4. Verify that both input datasets have the required record attributes and sorted keys.
-5. Compile the COBOL program and resolve any compiler errors.
-6. Execute tests covering:
-   - Normal matching records
-   - Amount mismatches
-   - Transactions without settlements
-   - Settlements without transactions
-   - Invalid amounts
-   - Output-file failures
-7. Save the compiler listing, JES/SDSF job output, return codes, and generated report as test evidence.
-8. Confirm whether duplicate IDs and direct COBOL-to-Db2 integration are required for acceptance.
+**Embedded SQL is not yet implemented in `RECONCIL.cbl`.** The current SQL scripts do not, by themselves, demonstrate that the COBOL program writes reconciliation results to Db2.
+
+The following remain pending:
+
+- Embedded SQL statements and host-variable definitions in COBOL.
+- SQL error handling, including `SQLCODE` and `SQLSTATE` checks.
+- Db2 precompilation or SQL coprocessor configuration, compilation, linking, binding, and runtime configuration.
+- Execution against the team's approved Db2 environment and verification of stored results.
+
+These steps require the target environment and will be handled during the next integration stage.
+
+## 7. Target-Environment Validation
+
+The integration reviewer should verify:
+
+1. Input dataset attributes and ascending transaction-ID ordering.
+2. Transaction sorting/deduplication produces the expected five unique transaction IDs from the supplied fixture.
+3. Settlement sorting produces the expected five records.
+4. The four COBOL output datasets have the required record formats and lengths.
+5. The normal fixture produces five matches and no business exceptions.
+6. Negative tests produce the expected mismatch or missing-record diagnostics.
+7. Return codes and downstream EOD controls behave as specified.
+8. Compiler listings, job output, record counts, and exception files are retained as evidence.
+9. Embedded SQL and Db2 build/runtime integration are completed and verified separately.
+
+No successful compilation, execution, or end-to-end Db2 validation is claimed by these notes.

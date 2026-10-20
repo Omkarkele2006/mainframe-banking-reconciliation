@@ -12,9 +12,8 @@ SAY '========================================'
 SAY ' BANKING RECONCILIATION VALIDATION'
 SAY '========================================'
 
-/* Use the actual sorted dataset names for this test environment. */
-TRAN_DSN = 'Z73736.TXNSORT'
-SETT_DSN = 'Z73736.SETSORT'
+TRAN_DSN = 'Z73968.BANK.TXNSORT'
+SETT_DSN = 'Z73968.BANK.SETSORT'
 
 EXPECTED_LENGTH = 38
 FAIL = 0
@@ -53,7 +52,10 @@ CHECK_DATASET:
 
     SAY 'PASS:' LABEL 'dataset is accessible.'
 
-    QUEUE_NAME = 'VALQ'
+    IF LABEL = 'TRANSACTION' THEN
+        QUEUE_NAME = 'VALT'
+    ELSE
+        QUEUE_NAME = 'VALS'
 
     /* Allocate the dataset for shared reading. */
     ADDRESS TSO "ALLOC FI("QUEUE_NAME") DA('"DSN"') SHR REUSE"
@@ -63,6 +65,30 @@ CHECK_DATASET:
         SAY 'FAIL:' LABEL 'allocation failed. RC=' ALLOC_RC
         FAIL = 1
         RETURN
+    END
+
+    /* LISTDSI exposes the cataloged dataset attributes after allocation. */
+    DROP SYSDSORG SYSRECFM SYSLRECL
+    LIST_RC = LISTDSI("'"DSN"'")
+    IF LIST_RC <> 0 THEN DO
+        SAY 'FAIL:' LABEL 'attribute query failed. RC=' LIST_RC
+        FAIL = 1
+        ADDRESS TSO "FREE FI("QUEUE_NAME")"
+        IF RC <> 0 THEN SAY 'FAIL:' LABEL 'deallocation failed. RC=' RC
+        RETURN
+    END
+
+    IF SYSDSORG <> 'PS' THEN DO
+        SAY 'FAIL:' LABEL 'organization is' SYSDSORG '- expected PS.'
+        FAIL = 1
+    END
+    IF SYSRECFM <> 'FB' THEN DO
+        SAY 'FAIL:' LABEL 'RECFM is' SYSRECFM '- expected FB.'
+        FAIL = 1
+    END
+    IF SYSLRECL <> EXPECTED_LENGTH THEN DO
+        SAY 'FAIL:' LABEL 'LRECL is' SYSLRECL '- expected' EXPECTED_LENGTH
+        FAIL = 1
     END
 
     DROP REC.
@@ -103,7 +129,8 @@ CHECK_DATASET:
         END
     END
 
-    /* Release the allocation and report any failure. */
+    /* EXECIO reads FB records at their declared LRECL.  It cannot prove that
+       a shorter physical record was not padded by the dataset organization. */
     ADDRESS TSO "FREE FI("QUEUE_NAME")"
     FREE_RC = RC
 

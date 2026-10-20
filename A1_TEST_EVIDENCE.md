@@ -33,6 +33,12 @@ Control file: `sort/SORTCNTL.txt`
 
 Local dataset and reference-output checks were performed using PowerShell. These checks validate the local test files and do not independently prove mainframe execution.
 
+### Historical execution records
+
+The following entries are retained as historical evidence supplied with the
+repository. They are not re-executed or independently verified by this source
+update; current manual validation must retain the actual JES output.
+
 ### Actual DFSORT Execution — IBM Z Xplore
 
 - Job name: DFSORT1
@@ -45,7 +51,7 @@ Local dataset and reference-output checks were performed using PowerShell. These
 - Duplicate handling: `SUM FIELDS=NONE`
 - Verification: DFSORT spool statistics and SORTOUT inspected.
 
-### Actual Project DFSORT Execution — z/OS
+### Historical project DFSORT execution — z/OS
 
 - Job name: TXNSORT
 - Job ID: JOB04859
@@ -61,6 +67,9 @@ Local dataset and reference-output checks were performed using PowerShell. These
 
 ### Remaining Validation
 
-The project-specific duplicate-removal test has been executed successfully on z/OS. The complete integrated workflow, including REXX validation, COBOL reconciliation, Db2/VSAM integration, and EOD success/failure scenarios, remains to be tested.
+The complete integrated workflow, including REXX validation, COBOL
+reconciliation, Db2 integration, and EOD success/failure scenarios remains
+pending current target-environment validation. VSAM is an optional standalone
+extension and is not part of the master flow.
 
 The current duplicate-removal policy retains one record per TXN_ID. Duplicate settlement handling and the final integrated workflow must be validated before the project is considered complete.

@@ -12,9 +12,14 @@
 //* TXNMISS, SETMISS. MATCHOUT=FB/38; exception outputs=FB/120.
 //* RC contract: 0=clean; 4=business exceptions; >=8=technical failure.
 //* EOD runs for RC=0 or RC=4; FINAL requires RC=0 and passing counts.
-//* DB2 NOTE: PGM=RECONCIL below is file-only scaffolding. Once embedded
-//* SQL is added, use the site's DB2 precompile/build and DSN runtime/plan.
-//* Confirm the subsystem, plan, compiler PROC and DB2 libraries first.
+//* DB2 NOTE: RECONCIL contains embedded SQL and must be built and run through
+//* the site-approved Db2 precompile/coprocessor and attachment facility.
+//* The EXEC below is a source-interface placeholder, not a verified Db2
+//* runtime invocation. Complete db2/BUILD_RUN_TEMPLATE.md first.
+//* The program requires a unique run ID through its command-line parameter;
+//* RECON_RUN_ID must be supplied by the site's symbol/procedure mechanism.
+//* This unresolved symbol intentionally leaves this invocation non-runnable
+//* until the site documents its parameter-passing convention.
 //TXNSORT  EXEC PGM=SORT
 //SYSOUT   DD SYSOUT=*
 //SORTIN   DD DSN=Z73968.BANK.TXNTEST,DISP=SHR
@@ -45,7 +50,7 @@
   EXEC 'Z73968.BANK.REXXLIB(VALIDATE)'
 /*
 //REXXOK   IF (REXXVAL.RC = 0) THEN
-//RECONCIL EXEC PGM=RECONCIL
+//RECONCIL EXEC PGM=RECONCIL,PARM='&RECON_RUN_ID'
 //STEPLIB  DD DSN=Z73968.BANK.LOAD,DISP=SHR
 //TRANIN   DD DSN=Z73968.BANK.TXNSORT,DISP=SHR
 //SETTIN   DD DSN=Z73968.BANK.SETSORT,DISP=SHR

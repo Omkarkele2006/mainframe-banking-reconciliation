@@ -7,7 +7,11 @@
 - `db2/INSERT_TEST_DATA.sql`: Illustrative rows for the four reconciliation outcomes.
 - `db2/QUERIES.sql`: Queries for reviewing results, counting statuses, and identifying exceptions.
 
-**Implementation status:** The file-based COBOL reconciliation baseline is prepared for target-environment review. Successful compilation and execution have not yet been verified. Embedded SQL and Db2 build/runtime integration remain pending.
+**Implementation status:** The COBOL source preserves the file interfaces and
+now contains embedded SQL inserts and commit/error handling. Successful
+precompile, compilation, binding, execution, and Db2 verification have not
+been performed in this workspace. Site-specific build/runtime details remain
+pending; see `db2/BUILD_RUN_TEMPLATE.md`.
 
 ## 2. Input Record Layout
 
@@ -19,14 +23,17 @@ Both input datasets use:
 | Columns | Field | Format |
 |---|---|---|
 | 1–10 | `TXN_ID` | 10 characters |
-| 11–20 | `ACCOUNT_ID` | 10 characters |
+| 11–20 | `ACCOUNT_ID` | 10 characters in each input record |
 | 21–29 | `AMOUNT` | 9 numeric digits with two implied decimal places |
 | 30–37 | Date | `YYYYMMDD` |
 | 38 | Status | One character |
 
 Example: `000050000` represents `500.00`.
 
-The current COBOL logic validates and compares the fixed-width amount strings. It does not convert them into decimal values. Date and status are not compared by the current reconciliation scope.
+The reconciliation comparison validates and compares the fixed-width amount
+strings. The Db2 write path separately converts the nine-digit amount to a
+`DECIMAL(13,2)` host value. Date and status are not comparison fields in the
+current reconciliation scope.
 
 Both input datasets must be sorted in ascending order by `TXN_ID` before the merge.
 
@@ -68,19 +75,27 @@ The input amount is represented as nine numeric characters with two implied deci
 
 The current COBOL program validates that the amount field is numeric and compares the fixed-width amount strings when transaction and settlement IDs match. Because the validated fields have the same fixed width and numeric representation, string equality is used for the comparison.
 
-Conversion to a Db2 `DECIMAL(13,2)` value, if required by the database integration, must be implemented and validated as part of the subsequent Db2 integration work.
+The embedded-SQL path converts validated amounts by dividing the nine-digit
+integer by 100 before the `DECIMAL(13,2)` insert. Absent transaction or
+settlement values use nullable host-variable indicators.
 
 ## 6. Db2 Schema and Integration Status
 
 The Db2 SQL scripts define a reconciliation result table, illustrative expected-result rows, and queries for reviewing stored results. The result-table design uses `RUN_ID` together with `TXN_ID` as a composite key so the same transaction ID can be retained across separate reconciliation runs.
 
-**Embedded SQL is not yet implemented in `RECONCIL.cbl`.** The current SQL scripts do not, by themselves, demonstrate that the COBOL program writes reconciliation results to Db2.
+Embedded SQL is implemented in `RECONCIL.cbl`, but source presence does not
+demonstrate a successful target build or Db2 write. The SQL scripts define the
+same result schema and remain manual setup/query assets.
+
+Db2 stores `TRAN_ACCOUNT_ID` and `SETTLE_ACCOUNT_ID` independently so an
+account mismatch remains diagnosable. Transaction-only and settlement-only
+rows set the absent-side account, amount, date, and status indicators to
+NULL. Output files are closed before commit; technical failures attempt a
+rollback and return RC 8 or higher.
 
 The following remain pending:
 
-- Embedded SQL statements and host-variable definitions in COBOL.
-- SQL error handling, including `SQLCODE` and `SQLSTATE` checks.
-- Db2 precompilation or SQL coprocessor configuration, compilation, linking, binding, and runtime configuration.
+- Target-environment precompilation, binding, and runtime execution.
 - Execution against the team's approved Db2 environment and verification of stored results.
 
 These steps require the target environment and will be handled during the next integration stage.

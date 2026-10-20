@@ -5,6 +5,9 @@
 //* TXNMISS=0, SETMISS=0. A passing gate publishes FINAL only.
 //* This is not the 10,000-record volume profile.
 //* Before rerun, remove only prior outputs: FINAL and EODERROR.
+//* Set RECONRC to the actual Db2-attached COBOL RC before running. The
+//* default is fail-closed; do not set it to 0 without verified RC 0 evidence.
+// SET RECONRC=8
 //TXNCHK   EXEC PGM=ICETOOL
 //TOOLMSG  DD SYSOUT=*
 //DFSMSG   DD SYSOUT=*
@@ -47,7 +50,7 @@
 //TOOLIN   DD *
   COUNT FROM(SETMISS) NOTEQUAL(0) RC8
 /*
-//PUBOK    IF (TXNCHK.RC = 0 & SETCHK.RC = 0 &
+//PUBOK    IF (&RECONRC = 0 & TXNCHK.RC = 0 & SETCHK.RC = 0 &
 //            MATCHCHK.RC = 0 & MISMCHK.RC = 0 &
 //            TNMCHK.RC = 0 & STMCHK.RC = 0) THEN
 //FINALCP  EXEC PGM=IEBGENER
@@ -60,9 +63,9 @@
 //SYSPRINT DD SYSOUT=*
 //SYSIN    DD DUMMY
 //PUBEND   ENDIF
-//EODFAIL  IF (TXNCHK.RC > 0 | SETCHK.RC > 0 | MATCHCHK.RC > 0 |
-//            MISMCHK.RC > 0 | TNMCHK.RC > 0 | STMCHK.RC > 0 |
-//            FINALCP.RC > 0) THEN
+//EODFAIL  IF (&RECONRC > 0 | TXNCHK.RC > 0 | SETCHK.RC > 0 |
+//            MATCHCHK.RC > 0 | MISMCHK.RC > 0 | TNMCHK.RC > 0 |
+//            STMCHK.RC > 0 | FINALCP.RC > 0) THEN
 //ERRWRITE EXEC PGM=IEBGENER
 //SYSUT1   DD *
 EOD VALIDATION FAILED - FINAL OUTPUT NOT PUBLISHED

@@ -7,10 +7,10 @@ My responsibility in the Banking Reconciliation project is to implement and vali
 ## 2. Program Details
 
 - **Local source file:** `rexx/VALIDATE.rex`
-- **Mainframe library:** `Z73736.SOURCE`
+- **Mainframe library:** `<SITE_REXX_LIBRARY>`
 - **Mainframe member:** `VALIDATE`
-- **Transaction dataset:** `Z73736.TXNSORT`
-- **Settlement dataset:** `Z73736.SETSORT`
+- **Transaction dataset:** `Z73968.BANK.TXNSORT`
+- **Settlement dataset:** `Z73968.BANK.SETSORT`
 
 ## 3. Validation Requirements
 
@@ -27,38 +27,21 @@ The REXX program checks the following conditions for both sorted datasets:
 - **RC 0:** Validation completed successfully.
 - **RC 12:** Validation or technical failure was detected.
 
-## 4. Local Testing
+## 4. Local fixture status
 
 The local PowerShell pre-validation script was executed using:
 
 `VALIDATION_TEST_KK.ps1`
 
-Results:
+The repository contains local fixtures and a local checker, but no current
+workspace execution is claimed here. Those checks cannot execute this REXX
+member.
 
-- Transaction input: 10,000 records; all records have 38 characters.
-- Settlement input: 10,000 records; all records have 38 characters.
-- Invalid-record fixture: 37 characters, correctly identified as a wrong-length fixture.
-- Missing-file condition: detected as expected.
-- Overall result: `ALL LOCAL PRE-VALIDATION CHECKS PASSED`.
+## 5. Target-environment execution status
 
-These checks validate local test files and conditions. They do not execute the REXX program.
-
-## 5. Actual Mainframe Execution
-
-The REXX validation program was submitted on z/OS using the `RUNVAL` JCL member.
-
-- **Job name:** `RUNVAL`
-- **Job ID:** `JOB04178`
-- **Job-level return code:** `CC 0000`
-- **Transaction dataset:** `Z73736.TXNSORT`
-- **Transaction result:** PASS — 5 records, each 38 bytes.
-- **Settlement dataset:** `Z73736.SETSORT`
-- **Settlement result:** PASS — 5 records, each 38 bytes.
-- **REXX output:** `VALIDATION SUCCESS`
-- **REXX return code:** `0`
-- **Output inspected:** `STEP1:SYSTSPRT(102)` in Zowe Explorer.
-
-The job output confirms that both datasets were accessible, non-empty, and accepted by the record-length checks.
+No current target-environment job ID, return code, or successful REXX
+execution is claimed by this document. Run the member against the two
+`Z73968.BANK` sorted datasets and retain the actual output and RC.
 
 ## 6. Scope and Limitations
 
@@ -73,8 +56,14 @@ The following items remain to be tested:
 - Db2 integration and SQL error handling.
 - End-of-day success and failure scenarios.
 
-The successful REXX test does not establish that the complete banking reconciliation workflow has passed.
+Even a successful REXX run will not establish that the complete banking
+reconciliation workflow has passed. `EXECIO` reads FB records at the declared
+LRECL, so it cannot prove that an originally short physical record was not
+padded to 38 bytes.
 
 ## 7. Conclusion
 
-The REXX validator has been executed successfully on z/OS against `Z73736.TXNSORT` and `Z73736.SETSORT`, returning RC 0. Local pre-validation checks also passed. Additional negative tests and full integration testing remain pending.
+The REXX source is aligned to the contract's `Z73968.BANK` sorted datasets
+and returns RC 0 only when both validations complete successfully. No current
+z/OS execution is claimed. Actual target execution, negative tests, and full
+integration testing remain pending.

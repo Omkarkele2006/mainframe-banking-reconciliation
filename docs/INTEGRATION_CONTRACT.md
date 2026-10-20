@@ -57,7 +57,12 @@ For the current scope, a shared `TXN_ID` is `MATCHED` only when `ACCOUNT_ID` and
 
 The transaction fixture has exact duplicate rows and the DFSORT stage deduplicates by TXN_ID. Conflicting rows with the same TXN_ID and duplicate settlement IDs are not covered by the smoke profile. They must be assigned a business rule and tested before claiming general duplicate-handling support.
 
-**COBOL report length check:** `MISMOUT`, `TXNMISS`, and `SETMISS` are `LRECL=120` in this contract. Every assembled exception message must fit within 120 bytes. The current PR source uses a 24-character result plus a 40-character detail in a report assembled from multiple labels and amounts, which can exceed 120 bytes. Before using the 120-byte DDs, shorten the detail field/messages (for example, `WS-DETAIL PIC X(24)` and concise detail literals) or revise the agreed output LRECL in both COBOL and JCL; do not leave potential `STRING` overflow untested.
+**COBOL report length check:** `MISMOUT`, `TXNMISS`, and `SETMISS` are
+`LRECL=120`. Mismatch diagnostics retain the transaction ID, both account
+IDs, and both nine-character input amounts in a bounded 120-byte record.
+Missing-side diagnostics retain the present ID and status. COBOL checks
+`STRING` overflow and treats it as a technical failure rather than writing a
+truncated diagnostic.
 
 ## 4. Return-code contract
 
@@ -76,11 +81,16 @@ Before rerunning JCL that allocates outputs with `DISP=(NEW,CATLG,DELETE)`, remo
 
 ## 6. Db2 scope — required, environment details still to confirm
 
-Embedded SQL in COBOL is part of the project work distribution; separate SQL scripts are useful for schema setup and inspection but are not a substitute for COBOL-to-Db2 inserts/lookups in the final deliverable.
+Embedded SQL in COBOL is the sole planned persistence integration. Separate
+SQL scripts are useful for schema setup and inspection but are not a
+substitute for the COBOL-to-Db2 inserts in the final deliverable. VSAM is not
+part of this master flow.
 
 For each unique reconciled TXN_ID, the intended Db2 result statuses are `MATCHED`, `MISMATCHED`, `MISSING_SETTLEMENT`, and `MISSING_TRANSACTION`. The COBOL program must check SQLCODE/SQLSTATE and must not report RC 0 if SQL processing fails.
 
-The repository does not currently prove the following environment-specific details. Do not guess them in runnable JCL:
+The source contains the insert, close-before-commit, commit, and rollback
+paths, but the repository does not prove the following environment-specific
+details. Do not guess them in runnable JCL:
 
 1. The target COBOL cataloged procedure/compiler version and compile options.
 2. The Db2 subsystem ID, plan/package or collection names, Db2 precompiler procedure and required load libraries.
@@ -89,7 +99,18 @@ The repository does not currently prove the following environment-specific detai
 
 IBM commonly documents `IGYWCL` as a compile/link-edit cataloged procedure, but availability and library/version values are installation-dependent. Since the final COBOL source is intended to contain embedded SQL, use the environment's Db2 precompile/build/bind path rather than assuming a non-SQL `IGYWCL` job is the finished build. Confirm the installed procedure and run method from a working course example or the system administrator.
 
-The current `MASTER.jcl` uses `EXEC PGM=RECONCIL` as a file-only integration scaffold. It is not the final runtime invocation for a static embedded-SQL COBOL program. Update that step to the confirmed Db2 batch run method after the subsystem and plan are known.
+`MASTER.jcl` retains the DD interface as a source-interface placeholder. Its
+`EXEC PGM=RECONCIL` line is not a verified embedded-SQL runtime invocation.
+Complete `db2/BUILD_RUN_TEMPLATE.md` and replace the step with the confirmed
+Db2 batch run method before treating the master flow as runnable. The
+template's `RECON_RUN_ID` symbol must be connected to the site's approved
+unique run-ID source; no site-specific symbol mechanism is invented here.
+Production logic does not hardcode a sample ID.
+
+If any output write, output close, SQL insert, or SQL commit fails, COBOL sets
+RC 8 or higher and attempts `ROLLBACK`. A normal business-exception run closes
+all outputs successfully, commits its four-status result rows, and returns RC
+4. A technical failure never intentionally commits pending Db2 work.
 
 ## 7. Evidence required for the progress review
 

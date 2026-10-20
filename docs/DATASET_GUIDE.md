@@ -19,10 +19,19 @@ The primary datasets contain fictional test data. Before shared integration or m
 
 If approved for mainframe use, the proposed dataset attributes are `RECFM=FB` and `LRECL=38`. The files have no header row or field delimiters.
 
+## Validation scope and status
+
+The source contract, JCL DCB definitions, REXX checks, and COBOL DD
+interfaces are implemented for manual target-environment validation. The
+local text fixtures are reference inputs only; they are not evidence of
+current z/OS, Db2, or end-to-end execution.
+
 ## Invalid-record REXX test
 
 `test-data/INVALID_RECORD_TEST.txt` contains a 37-character record. The local PowerShell check verifies the fixture length only and does not demonstrate that `VALIDATE.rex` rejects the record.
 
 For the mainframe test, use an approved input method that preserves the record's actual 37-character length. Do not assume that loading the record into a dataset defined as `RECFM=FB,LRECL=38` will preserve the short length, because it may be padded to 38 bytes.
 
-Run the validator against the test input and record the observed output and return code. If the test input is padded, use a different approved test method. Mark the test as pending until actual rejection has been observed.
+Run the validator against the test input and record the observed output and
+return code. If the test input is padded, use a different approved test
+method. Mark the test as pending until actual rejection has been observed.

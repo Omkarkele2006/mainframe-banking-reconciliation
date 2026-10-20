@@ -19,6 +19,8 @@ PASS: All 8 scenario test files contain records exactly 38 characters long.
 SCOPE AND LIMITATIONS
 These checks validate local text-file contents and record lengths.
 DFSORT, COBOL, JCL, and mainframe execution have not been validated by this report.
+This report is local fixture evidence only; it is not current evidence of
+REXX, embedded SQL, Db2, VSAM, or end-to-end execution.
 The 38-byte layout and duplicate-handling policy must be confirmed for shared integration and mainframe execution.
 ### Duplicate Removal Simulation
 
@@ -31,7 +33,7 @@ The 38-byte layout and duplicate-handling policy must be confirmed for shared in
 - Settlement record length validation: PASS
 
 **Note:** This expected output was generated and verified locally using PowerShell. It is a reference for testing, not evidence of actual DFSORT execution on z/OS.
-### Automated Local Validation
+### Automated Local Validation (historical/local evidence)
 
 - Validation script: `validate_datasets.ps1`
 - Main transaction dataset: PASS — 10,000 records

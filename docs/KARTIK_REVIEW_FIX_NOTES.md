@@ -7,11 +7,11 @@
 - `db2/INSERT_TEST_DATA.sql`: Illustrative rows for the four reconciliation outcomes.
 - `db2/QUERIES.sql`: Queries for reviewing results, counting statuses, and identifying exceptions.
 
-**Implementation status:** The COBOL source preserves the file interfaces and
-now contains embedded SQL inserts and commit/error handling. Successful
-precompile, compilation, binding, execution, and Db2 verification have not
-been performed in this workspace. Site-specific build/runtime details remain
-pending; see `db2/BUILD_RUN_TEMPLATE.md`.
+**Implementation status:** The COBOL source is now file-based and reads the
+settlement input from the VSAM KSDS. Successful compilation, execution, and
+end-to-end verification have not been performed in this workspace. Db2 schema
+and SQL scripts remain deferred because table creation currently fails with
+SQLCODE -551; see `db2/BUILD_RUN_TEMPLATE.md` for future integration work.
 
 ## 2. Input Record Layout
 
@@ -44,7 +44,7 @@ Both input datasets must be sorted in ascending order by `TXN_ID` before the mer
 | DD name | Purpose |
 |---|---|
 | `TRANIN` | Sorted transaction input (`TXNSORT`) |
-| `SETTIN` | Sorted settlement input (`SETSORT`) |
+| `SETTIN` | Settlement VSAM KSDS reloaded from `SETSORT` |
 
 ### Output DD names
 
@@ -75,23 +75,21 @@ The input amount is represented as nine numeric characters with two implied deci
 
 The current COBOL program validates that the amount field is numeric and compares the fixed-width amount strings when transaction and settlement IDs match. Because the validated fields have the same fixed width and numeric representation, string equality is used for the comparison.
 
-The embedded-SQL path converts validated amounts by dividing the nine-digit
-integer by 100 before the `DECIMAL(13,2)` insert. Absent transaction or
-settlement values use nullable host-variable indicators.
+The file-based path compares validated fixed-width amount strings. Db2 amount
+conversion and nullable host-variable behavior are deferred with the SQL
+integration.
 
 ## 6. Db2 Schema and Integration Status
 
 The Db2 SQL scripts define a reconciliation result table, illustrative expected-result rows, and queries for reviewing stored results. The result-table design uses `RUN_ID` together with `TXN_ID` as a composite key so the same transaction ID can be retained across separate reconciliation runs.
 
-Embedded SQL is implemented in `RECONCIL.cbl`, but source presence does not
-demonstrate a successful target build or Db2 write. The SQL scripts define the
-same result schema and remain manual setup/query assets.
+Embedded SQL is not present in the current `RECONCIL.cbl`. The SQL scripts
+define deferred schema/setup/query assets and do not demonstrate a successful
+target build or Db2 write.
 
-Db2 stores `TRAN_ACCOUNT_ID` and `SETTLE_ACCOUNT_ID` independently so an
-account mismatch remains diagnosable. Transaction-only and settlement-only
-rows set the absent-side account, amount, date, and status indicators to
-NULL. Output files are closed before commit; technical failures attempt a
-rollback and return RC 8 or higher.
+The current file outputs retain the transaction and settlement details needed
+for mismatch and missing-record diagnostics. File errors return RC 8 or
+higher; business exceptions return RC 4.
 
 The following remain pending:
 
@@ -112,6 +110,7 @@ The integration reviewer should verify:
 6. Negative tests produce the expected mismatch or missing-record diagnostics.
 7. Return codes and downstream EOD controls behave as specified.
 8. Compiler listings, job output, record counts, and exception files are retained as evidence.
-9. Embedded SQL and Db2 build/runtime integration are completed and verified separately.
+9. Db2 permissions, build/runtime integration, and stored-result verification
+are completed separately from the current VSAM flow.
 
 No successful compilation, execution, or end-to-end Db2 validation is claimed by these notes.

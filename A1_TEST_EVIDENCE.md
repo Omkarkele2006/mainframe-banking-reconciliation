@@ -67,9 +67,11 @@ update; current manual validation must retain the actual JES output.
 
 ### Remaining Validation
 
-The complete integrated workflow, including REXX validation, COBOL
-reconciliation, Db2 integration, and EOD success/failure scenarios remains
-pending current target-environment validation. VSAM is an optional standalone
-extension and is not part of the master flow.
+The complete integrated workflow, including REXX validation, VSAM reload,
+COBOL reconciliation, and EOD success/failure scenarios remains pending
+current target-environment validation. The current master flow is file-based
+with a VSAM settlement input. Db2 integration is deferred because the required
+permissions are unavailable; no embedded-SQL or end-to-end completion is
+claimed.
 
 The current duplicate-removal policy retains one record per TXN_ID. Duplicate settlement handling and the final integrated workflow must be validated before the project is considered complete.

@@ -8,7 +8,9 @@
                ORGANIZATION IS SEQUENTIAL
                FILE STATUS IS WS-TFS.
            SELECT SETTLE-FILE ASSIGN TO SETTIN
-               ORGANIZATION IS SEQUENTIAL
+               ORGANIZATION IS INDEXED
+               ACCESS MODE IS SEQUENTIAL
+               RECORD KEY IS SETTLE-ID
                FILE STATUS IS WS-SFS.
            SELECT MATCH-FILE ASSIGN TO MATCHOUT
                ORGANIZATION IS SEQUENTIAL
@@ -60,9 +62,6 @@
        01  SETMISS-REC         PIC X(120).
 
        WORKING-STORAGE SECTION.
-           EXEC SQL
-               INCLUDE SQLCA
-           END-EXEC.
 
        01  WS-TFS              PIC XX VALUE SPACES.
        01  WS-SFS              PIC XX VALUE SPACES.
@@ -89,44 +88,13 @@
        01  WS-TONLY            PIC 9(7) VALUE 0.
        01  WS-SONLY            PIC 9(7) VALUE 0.
 
-       01  WS-RUN-ID           PIC X(32) VALUE SPACES.
-       01  WS-DB2-TXN-ID       PIC X(10) VALUE SPACES.
-       01  WS-DB2-STATUS       PIC X(24) VALUE SPACES.
-       01  WS-DB2-DETAIL       PIC X(100) VALUE SPACES.
-       01  WS-DB2-TACCOUNT     PIC X(10) VALUE SPACES.
-       01  WS-DB2-SACCOUNT     PIC X(10) VALUE SPACES.
-       01  WS-DB2-TDATE        PIC X(8) VALUE SPACES.
-       01  WS-DB2-SDATE        PIC X(8) VALUE SPACES.
-       01  WS-DB2-TSTATUS      PIC X VALUE SPACE.
-       01  WS-DB2-SSTATUS      PIC X VALUE SPACE.
-       01  WS-DB2-TAMT         PIC S9(13)V99 COMP-3 VALUE 0.
-       01  WS-DB2-SAMT         PIC S9(13)V99 COMP-3 VALUE 0.
-       01  WS-T-AMT-NUM        PIC 9(9) VALUE 0.
-       01  WS-S-AMT-NUM        PIC 9(9) VALUE 0.
-       01  WS-DB2-TAMT-IND     PIC S9(4) COMP VALUE 0.
-       01  WS-DB2-SAMT-IND     PIC S9(4) COMP VALUE 0.
-       01  WS-DB2-TACCT-IND    PIC S9(4) COMP VALUE 0.
-       01  WS-DB2-SACCT-IND    PIC S9(4) COMP VALUE 0.
-       01  WS-DB2-TDATE-IND    PIC S9(4) COMP VALUE 0.
-       01  WS-DB2-SDATE-IND    PIC S9(4) COMP VALUE 0.
-       01  WS-DB2-TSTAT-IND    PIC S9(4) COMP VALUE 0.
-       01  WS-DB2-SSTAT-IND    PIC S9(4) COMP VALUE 0.
-
        PROCEDURE DIVISION.
        MAIN.
-           ACCEPT WS-RUN-ID FROM COMMAND-LINE
-           IF WS-RUN-ID = SPACES
-               DISPLAY "RUN ID IS REQUIRED"
-               MOVE 8 TO WS-RC
-               MOVE WS-RC TO RETURN-CODE
-               GOBACK
-           END-IF
            OPEN INPUT TRAN-FILE
            IF WS-TFS NOT = "00"
                DISPLAY "OPEN TRANIN FAILED: " WS-TFS
                MOVE 8 TO WS-RC
                PERFORM CLEANUP
-               PERFORM ROLLBACK-DB2
                MOVE WS-RC TO RETURN-CODE
                GOBACK
            END-IF
@@ -137,7 +105,6 @@
                DISPLAY "OPEN SETTIN FAILED: " WS-SFS
                MOVE 8 TO WS-RC
                PERFORM CLEANUP
-               PERFORM ROLLBACK-DB2
                MOVE WS-RC TO RETURN-CODE
                GOBACK
            END-IF
@@ -148,7 +115,6 @@
                DISPLAY "OPEN MATCHOUT FAILED: " WS-MFS
                MOVE 8 TO WS-RC
                PERFORM CLEANUP
-               PERFORM ROLLBACK-DB2
                MOVE WS-RC TO RETURN-CODE
                GOBACK
            END-IF
@@ -159,7 +125,6 @@
                DISPLAY "OPEN MISMOUT FAILED: " WS-MISFS
                MOVE 8 TO WS-RC
                PERFORM CLEANUP
-               PERFORM ROLLBACK-DB2
                MOVE WS-RC TO RETURN-CODE
                GOBACK
            END-IF
@@ -170,7 +135,6 @@
                DISPLAY "OPEN TXNMISS FAILED: " WS-TMFS
                MOVE 8 TO WS-RC
                PERFORM CLEANUP
-               PERFORM ROLLBACK-DB2
                MOVE WS-RC TO RETURN-CODE
                GOBACK
            END-IF
@@ -181,7 +145,6 @@
                DISPLAY "OPEN SETMISS FAILED: " WS-SMFS
                MOVE 8 TO WS-RC
                PERFORM CLEANUP
-               PERFORM ROLLBACK-DB2
                MOVE WS-RC TO RETURN-CODE
                GOBACK
            END-IF
@@ -227,12 +190,6 @@
            END-PERFORM
 
            PERFORM CLEANUP
-           IF WS-RC >= 8
-               PERFORM ROLLBACK-DB2
-           ELSE
-               PERFORM COMMIT-DB2
-           END-IF
-
            DISPLAY "TRANSACTION INPUT COUNT: " WS-COUNT-T
            DISPLAY "SETTLEMENT INPUT COUNT:  " WS-COUNT-S
            DISPLAY "MATCHED COUNT:           " WS-MATCH
@@ -307,12 +264,6 @@
                ELSE
                    ADD 1 TO WS-MATCH
                END-IF
-               IF WS-RC < 8
-                   MOVE "MATCHED" TO WS-DB2-STATUS
-                   MOVE "Account and amount agree" TO WS-DB2-DETAIL
-                   PERFORM PREPARE-BOTH-DB2
-                   PERFORM WRITE-DB2
-               END-IF
            ELSE
                MOVE SPACES TO MISMATCH-REC
                STRING
@@ -333,12 +284,6 @@
                    MOVE 8 TO WS-RC
                ELSE
                    ADD 1 TO WS-MISMATCH
-               END-IF
-               IF WS-RC < 8
-                   MOVE "MISMATCHED" TO WS-DB2-STATUS
-                   MOVE "Account or amount differs" TO WS-DB2-DETAIL
-                   PERFORM PREPARE-BOTH-DB2
-                   PERFORM WRITE-DB2
                END-IF
            END-IF.
 
@@ -363,12 +308,6 @@
            ELSE
                ADD 1 TO WS-TONLY
            END-IF.
-           IF WS-RC < 8
-               MOVE "MISSING_SETTLEMENT" TO WS-DB2-STATUS
-               MOVE "Transaction has no settlement" TO WS-DB2-DETAIL
-               PERFORM PREPARE-TRAN-DB2
-               PERFORM WRITE-DB2
-           END-IF.
 
        WRITE-S-ONLY.
            IF SETTLE-AMOUNT IS NOT NUMERIC
@@ -390,104 +329,6 @@
                MOVE 8 TO WS-RC
            ELSE
                ADD 1 TO WS-SONLY
-           END-IF.
-           IF WS-RC < 8
-               MOVE "MISSING_TRANSACTION" TO WS-DB2-STATUS
-               MOVE "Settlement has no transaction" TO WS-DB2-DETAIL
-               PERFORM PREPARE-SETTLE-DB2
-               PERFORM WRITE-DB2
-           END-IF.
-
-       PREPARE-BOTH-DB2.
-           MOVE TRAN-ID TO WS-DB2-TXN-ID
-           MOVE TRAN-ACCOUNT TO WS-DB2-TACCOUNT
-           MOVE SETTLE-ACCOUNT TO WS-DB2-SACCOUNT
-           MOVE TRAN-DATE TO WS-DB2-TDATE
-           MOVE SETTLE-DATE TO WS-DB2-SDATE
-           MOVE TRAN-STATUS TO WS-DB2-TSTATUS
-           MOVE SETTLE-STATUS TO WS-DB2-SSTATUS
-           MOVE 0 TO WS-DB2-TACCT-IND WS-DB2-SACCT-IND
-               WS-DB2-TAMT-IND
-               WS-DB2-SAMT-IND WS-DB2-TDATE-IND
-               WS-DB2-SDATE-IND WS-DB2-TSTAT-IND
-               WS-DB2-SSTAT-IND
-           MOVE TRAN-AMOUNT TO WS-T-AMT-NUM
-           COMPUTE WS-DB2-TAMT = WS-T-AMT-NUM / 100
-           MOVE SETTLE-AMOUNT TO WS-S-AMT-NUM
-           COMPUTE WS-DB2-SAMT = WS-S-AMT-NUM / 100.
-
-       PREPARE-TRAN-DB2.
-           MOVE TRAN-ID TO WS-DB2-TXN-ID
-           MOVE TRAN-ACCOUNT TO WS-DB2-TACCOUNT
-           MOVE -1 TO WS-DB2-SACCT-IND
-           MOVE TRAN-DATE TO WS-DB2-TDATE
-           MOVE TRAN-STATUS TO WS-DB2-TSTATUS
-           MOVE -1 TO WS-DB2-SAMT-IND WS-DB2-SDATE-IND
-               WS-DB2-SSTAT-IND
-           MOVE 0 TO WS-DB2-TACCT-IND WS-DB2-TAMT-IND
-               WS-DB2-TDATE-IND WS-DB2-TSTAT-IND
-           MOVE TRAN-AMOUNT TO WS-T-AMT-NUM
-           COMPUTE WS-DB2-TAMT = WS-T-AMT-NUM / 100.
-
-       PREPARE-SETTLE-DB2.
-           MOVE SETTLE-ID TO WS-DB2-TXN-ID
-           MOVE SETTLE-ACCOUNT TO WS-DB2-SACCOUNT
-           MOVE -1 TO WS-DB2-TACCT-IND
-           MOVE SETTLE-DATE TO WS-DB2-SDATE
-           MOVE SETTLE-STATUS TO WS-DB2-SSTATUS
-           MOVE -1 TO WS-DB2-TAMT-IND WS-DB2-TDATE-IND
-               WS-DB2-TSTAT-IND
-           MOVE 0 TO WS-DB2-SACCT-IND WS-DB2-SAMT-IND
-               WS-DB2-SDATE-IND WS-DB2-SSTAT-IND
-           MOVE SETTLE-AMOUNT TO WS-S-AMT-NUM
-           COMPUTE WS-DB2-SAMT = WS-S-AMT-NUM / 100.
-
-       WRITE-DB2.
-           EXEC SQL
-               INSERT INTO RECON_RESULTS
-                 (RUN_ID, TXN_ID, TRAN_ACCOUNT_ID,
-                  SETTLE_ACCOUNT_ID, TRAN_AMOUNT,
-                  SETTLE_AMOUNT, TRAN_DATE, SETTLE_DATE,
-                  TRAN_STATUS, SETTLE_STATUS, STATUS, DETAILS)
-               VALUES
-                 (:WS-RUN-ID, :WS-DB2-TXN-ID,
-                  :WS-DB2-TACCOUNT :WS-DB2-TACCT-IND,
-                  :WS-DB2-SACCOUNT :WS-DB2-SACCT-IND,
-                  :WS-DB2-TAMT :WS-DB2-TAMT-IND,
-                  :WS-DB2-SAMT :WS-DB2-SAMT-IND,
-                  :WS-DB2-TDATE :WS-DB2-TDATE-IND,
-                  :WS-DB2-SDATE :WS-DB2-SDATE-IND,
-                  :WS-DB2-TSTATUS :WS-DB2-TSTAT-IND,
-                  :WS-DB2-SSTATUS :WS-DB2-SSTAT-IND,
-                  :WS-DB2-STATUS, :WS-DB2-DETAIL)
-           END-EXEC
-           IF SQLCODE NOT = 0
-               DISPLAY "DB2 INSERT FAILED SQLCODE=" SQLCODE
-                   " SQLSTATE=" SQLSTATE
-               MOVE 8 TO WS-RC
-           END-IF.
-
-       COMMIT-DB2.
-           EXEC SQL
-               COMMIT
-           END-EXEC
-           IF SQLCODE NOT = 0
-               DISPLAY "DB2 COMMIT FAILED SQLCODE=" SQLCODE
-                   " SQLSTATE=" SQLSTATE
-               MOVE 8 TO WS-RC
-               PERFORM ROLLBACK-DB2
-           END-IF.
-
-       ROLLBACK-DB2.
-           EXEC SQL
-               ROLLBACK
-           END-EXEC
-           IF SQLCODE NOT = 0
-               DISPLAY "DB2 ROLLBACK FAILED SQLCODE=" SQLCODE
-                   " SQLSTATE=" SQLSTATE
-               IF WS-RC < 8
-                   MOVE 8 TO WS-RC
-               END-IF
            END-IF.
 
        CLEANUP.

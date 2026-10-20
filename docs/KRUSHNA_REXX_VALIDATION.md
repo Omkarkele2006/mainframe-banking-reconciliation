@@ -7,7 +7,7 @@ My responsibility in the Banking Reconciliation project is to implement and vali
 ## 2. Program Details
 
 - **Local source file:** `rexx/VALIDATE.rex`
-- **Mainframe library:** `<SITE_REXX_LIBRARY>`
+- **Mainframe library:** `Z73968.SOURCE`
 - **Mainframe member:** `VALIDATE`
 - **Transaction dataset:** `Z73968.BANK.TXNSORT`
 - **Settlement dataset:** `Z73968.BANK.SETSORT`

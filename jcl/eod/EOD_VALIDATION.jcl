@@ -5,7 +5,7 @@
 //* TXNMISS=0, SETMISS=0. A passing gate publishes FINAL only.
 //* This is not the 10,000-record volume profile.
 //* Before rerun, remove only prior outputs: FINAL and EODERROR.
-//* Set RECONRC to the actual Db2-attached COBOL RC before running. The
+//* Set RECONRC to the actual file-based COBOL RC before running. The
 //* default is fail-closed; do not set it to 0 without verified RC 0 evidence.
 // SET RECONRC=8
 //TXNCHK   EXEC PGM=ICETOOL

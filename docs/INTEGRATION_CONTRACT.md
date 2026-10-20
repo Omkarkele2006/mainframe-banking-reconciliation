@@ -41,7 +41,7 @@ The merge inputs must be in ascending `TXN_ID` order before COBOL runs.
 | DFSORT transaction | `Z73968.BANK.TXNTEST` | `Z73968.BANK.TXNSORT`; sort columns 1–10 and deduplicate by that key |
 | DFSORT settlement | `Z73968.BANK.SETTEST` | `Z73968.BANK.SETSORT`; sort columns 1–10 and preserve duplicate keys |
 | REXX validation | `TXNSORT`, `SETSORT` | Check dataset accessibility, non-empty input and 38-character records; RC 0 pass, nonzero fail. It must validate the sorted datasets used by COBOL, not the unsorted originals. |
-| COBOL input DDs | `TRANIN` = `TXNSORT`; `SETTIN` = `SETSORT` | Sorted fixed-width records as above |
+| COBOL input DDs | `TRANIN` = `TXNSORT`; `SETTIN` = `Z73968.BANK.RECON.REF.KSDS` | `TRANIN` is FB/38 PS; `SETTIN` is a 38-byte VSAM KSDS read sequentially |
 | COBOL output DDs | See table below | All four outputs must be created, including empty exception datasets |
 
 ### Required COBOL outputs
@@ -56,6 +56,11 @@ The merge inputs must be in ascending `TXN_ID` order before COBOL runs.
 For the current scope, a shared `TXN_ID` is `MATCHED` only when `ACCOUNT_ID` and `AMOUNT` agree. Date and one-character status are carried in the source record but are not comparison fields in this baseline. The team must explicitly change this contract if it wants those fields compared.
 
 The transaction fixture has exact duplicate rows and the DFSORT stage deduplicates by TXN_ID. Conflicting rows with the same TXN_ID and duplicate settlement IDs are not covered by the smoke profile. They must be assigned a business rule and tested before claiming general duplicate-handling support.
+
+The settlement KSDS is created once by `vsam/VSAM_CREATE.jcl` with a
+10-byte key at offset 0 and 38-byte records. Each master-job execution reloads
+the existing cluster from `Z73968.BANK.SETSORT` with `REPRO REPLACE`; cluster
+creation is not part of the repeatable master flow.
 
 **COBOL report length check:** `MISMOUT`, `TXNMISS`, and `SETMISS` are
 `LRECL=120`. Mismatch diagnostics retain the transaction ID, both account
@@ -79,47 +84,36 @@ The standalone `jcl/eod/EOD_VALIDATION.jcl` assumes COBOL already completed with
 
 Before rerunning JCL that allocates outputs with `DISP=(NEW,CATLG,DELETE)`, remove only the named intermediate/output datasets from a prior run. Never delete the source inputs as part of cleanup.
 
-## 6. Db2 scope — required, environment details still to confirm
+## 6. Db2 scope — deferred
 
-Embedded SQL in COBOL is the sole planned persistence integration. Separate
-SQL scripts are useful for schema setup and inspection but are not a
-substitute for the COBOL-to-Db2 inserts in the final deliverable. VSAM is not
-part of this master flow.
+The current COBOL and master path contain no embedded SQL. The Db2 schema and
+SQL scripts remain available for a later persistence integration, but Db2 table
+creation currently fails for the project user with SQLCODE -551. Do not treat
+those scripts as evidence of a working integration or substitute them for the
+current VSAM path.
 
-For each unique reconciled TXN_ID, the intended Db2 result statuses are `MATCHED`, `MISMATCHED`, `MISSING_SETTLEMENT`, and `MISSING_TRANSACTION`. The COBOL program must check SQLCODE/SQLSTATE and must not report RC 0 if SQL processing fails.
-
-The source contains the insert, close-before-commit, commit, and rollback
-paths, but the repository does not prove the following environment-specific
-details. Do not guess them in runnable JCL:
+When permissions are available, the following environment-specific details must
+be confirmed before adding a separate Db2 integration:
 
 1. The target COBOL cataloged procedure/compiler version and compile options.
 2. The Db2 subsystem ID, plan/package or collection names, Db2 precompiler procedure and required load libraries.
 3. Whether the shared environment grants use of the Db2 precompiler, bind and batch DSN runtime.
-4. Whether `Z73968.BANK.REXXLIB(VALIDATE)` and `Z73968.BANK.LOAD(RECONCIL)` have been created in the target environment.
+4. Whether `Z73968.SOURCE(VALIDATE)` and `Z73968.LOAD(RECONCIL)` have been created in the target environment.
 
-IBM commonly documents `IGYWCL` as a compile/link-edit cataloged procedure, but availability and library/version values are installation-dependent. Since the final COBOL source is intended to contain embedded SQL, use the environment's Db2 precompile/build/bind path rather than assuming a non-SQL `IGYWCL` job is the finished build. Confirm the installed procedure and run method from a working course example or the system administrator.
+IBM commonly documents `IGYWCL` as a compile/link-edit cataloged procedure, but availability and library/version values are installation-dependent. Confirm the installed procedure and run method from a working course example or the system administrator.
 
-`MASTER.jcl` retains the DD interface as a source-interface placeholder. Its
-`EXEC PGM=RECONCIL` line is not a verified embedded-SQL runtime invocation.
-Complete `db2/BUILD_RUN_TEMPLATE.md` and replace the step with the confirmed
-Db2 batch run method before treating the master flow as runnable. The
-template's `RECON_RUN_ID` symbol must be connected to the site's approved
-unique run-ID source; no site-specific symbol mechanism is invented here.
-Production logic does not hardcode a sample ID.
-
-If any output write, output close, SQL insert, or SQL commit fails, COBOL sets
-RC 8 or higher and attempts `ROLLBACK`. A normal business-exception run closes
-all outputs successfully, commits its four-status result rows, and returns RC
-4. A technical failure never intentionally commits pending Db2 work.
+The current COBOL returns RC 0 for a clean file reconciliation, RC 4 for
+business exceptions, and RC 8 or higher for technical file errors. It has no
+run-ID requirement, inserts, commits, or rollbacks.
 
 ## 7. Evidence required for the progress review
 
 1. Existing transaction DFSORT evidence: JES output showing 7 input records, 5 output records and RC 0.
 2. Settlement sort evidence: 5 input, 5 output, RC 0.
 3. REXX execution evidence against `TXNSORT` and `SETSORT`, including return code.
-4. COBOL compiler listing and run output, including counts and file/SQL status handling.
+4. COBOL compiler listing and run output, including counts and file-status handling.
 5. EOD evidence: six count checks pass, final dataset contains 5 records, and `EODERROR` is absent for the successful smoke run.
 6. Negative test: make a mismatch or missing-record fixture active in separate test datasets; show that the appropriate exception file is populated and `FINAL` is not published.
-7. Db2 evidence: table DDL executed, embedded-SQL program compiled/precompiled/bound and run, query results showing the expected statuses. Until this is done, mark Db2 integration as pending.
+7. Db2 evidence is deferred: table DDL, embedded-SQL build/runtime, and stored-result verification must not be claimed until permissions and target evidence exist.
 
 Do not describe a stage as tested based on source code or a local fixture check alone. A JES job ID, RC, relevant SYSOUT and inspected output dataset are the evidence for mainframe execution.

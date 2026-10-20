@@ -6,8 +6,8 @@
 - DFSORT
 - REXX
 - COBOL
-- Db2 (planned persistence integration)
-- VSAM (optional standalone extension; not in the master flow)
+- VSAM KSDS (settlement input for the current file-based flow)
+- Db2 (deferred persistence integration)
 - TSO/ISPF
 - JES/SDSF
 
@@ -21,13 +21,15 @@
 Input PS
 → DFSORT
 → REXX
+→ VSAM KSDS reload
 → COBOL
-→ Db2
 → Reconciliation Output
 → EOD Validation
 → Final Output
 
-The source interfaces and Db2 SQL path are implemented for manual
-target-environment validation. Local fixtures and historical evidence are not
-claims of current z/OS, Db2, or end-to-end execution. Complete the
-site-specific Db2 build/run template before using the embedded-SQL path.
+The current demo is file-based: `TRANIN` reads the sorted PS dataset
+`Z73968.BANK.TXNSORT`, and `SETTIN` reads the already-defined
+`Z73968.BANK.RECON.REF.KSDS` VSAM KSDS after it is reloaded from
+`Z73968.BANK.SETSORT`. The Db2 schema and SQL scripts remain in the repository
+as deferred work because the required database permissions are not available.
+No embedded-SQL integration or end-to-end target execution is claimed.

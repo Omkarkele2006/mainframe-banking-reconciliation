@@ -8,8 +8,8 @@
 --
 -- RUN_ID identifies a reconciliation run.
 -- TXN_ID identifies a transaction within that run.
--- Embedded SQL is present in RECONCIL.cbl; target precompile, bind, and
--- runtime execution remain pending.
+-- RECONCIL.cbl is currently file-based (no embedded SQL). Db2 precompile,
+-- bind, and runtime execution remain deferred pending SQLCODE -551 resolution.
 
 CREATE TABLE RECON_RESULTS
 (
@@ -25,8 +25,7 @@ CREATE TABLE RECON_RESULTS
     SETTLE_STATUS   CHAR(1),
     STATUS          VARCHAR(24) NOT NULL,
     DETAILS         VARCHAR(100),
-    RUN_TIMESTAMP   TIMESTAMP NOT NULL
-                    WITH DEFAULT CURRENT TIMESTAMP,
+    RUN_TIMESTAMP      TIMESTAMP NOT NULL WITH DEFAULT,
 
     CHECK (STATUS IN ('MATCHED', 'MISMATCHED',
                      'MISSING_SETTLEMENT', 'MISSING_TRANSACTION')),

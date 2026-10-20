@@ -12,14 +12,8 @@
 //* TXNMISS, SETMISS. MATCHOUT=FB/38; exception outputs=FB/120.
 //* RC contract: 0=clean; 4=business exceptions; >=8=technical failure.
 //* EOD runs for RC=0 or RC=4; FINAL requires RC=0 and passing counts.
-//* DB2 NOTE: RECONCIL contains embedded SQL and must be built and run through
-//* the site-approved Db2 precompile/coprocessor and attachment facility.
-//* The EXEC below is a source-interface placeholder, not a verified Db2
-//* runtime invocation. Complete db2/BUILD_RUN_TEMPLATE.md first.
-//* The program requires a unique run ID through its command-line parameter;
-//* RECON_RUN_ID must be supplied by the site's symbol/procedure mechanism.
-//* This unresolved symbol intentionally leaves this invocation non-runnable
-//* until the site documents its parameter-passing convention.
+//* Current path is file-based COBOL with a VSAM settlement KSDS.
+//* Create Z73968.BANK.RECON.REF.KSDS once with VSAM/VSAM_CREATE.jcl.
 //TXNSORT  EXEC PGM=SORT
 //SYSOUT   DD SYSOUT=*
 //SORTIN   DD DSN=Z73968.BANK.TXNTEST,DISP=SHR
@@ -47,13 +41,22 @@
 //REXXVAL  EXEC PGM=IKJEFT01,DYNAMNBR=20
 //SYSTSPRT DD SYSOUT=*
 //SYSTSIN  DD *
-  EXEC 'Z73968.BANK.REXXLIB(VALIDATE)'
+  EXEC 'Z73968.SOURCE(VALIDATE)'
 /*
 //REXXOK   IF (REXXVAL.RC = 0) THEN
-//RECONCIL EXEC PGM=RECONCIL,PARM='&RECON_RUN_ID'
-//STEPLIB  DD DSN=Z73968.BANK.LOAD,DISP=SHR
+//VSAMREP  EXEC PGM=IDCAMS
+//SYSPRINT DD SYSOUT=*
+//INPUT    DD DSN=Z73968.BANK.SETSORT,DISP=SHR
+//SYSIN    DD *
+  REPRO INFILE(INPUT) -
+        REPLACE -
+        OUTDATASET(Z73968.BANK.RECON.REF.KSDS)
+/*
+//REPROOK IF (VSAMREP.RC = 0) THEN
+//RECONCIL EXEC PGM=RECONCIL
+//STEPLIB  DD DSN=Z73968.LOAD,DISP=SHR
 //TRANIN   DD DSN=Z73968.BANK.TXNSORT,DISP=SHR
-//SETTIN   DD DSN=Z73968.BANK.SETSORT,DISP=SHR
+//SETTIN   DD DSN=Z73968.BANK.RECON.REF.KSDS,DISP=SHR
 //MATCHOUT DD DSN=Z73968.BANK.MATCHED,
 //            DISP=(NEW,CATLG,DELETE),
 //            SPACE=(TRK,(1,1)),
@@ -132,10 +135,12 @@
 //SYSIN    DD DUMMY
 //PUBEND   ENDIF
 //RECONEND ENDIF
+//REPROEND ENDIF
 //REXXEND  ENDIF
 //SORTEND  ENDIF
 //* One common failure marker for sort, REXX, COBOL, EOD or publish errors.
 //EODFAIL  IF (TXNSORT.RC > 0 | SETSORT.RC > 0 | REXXVAL.RC > 0 |
+//            VSAMREP.RC > 0 |
 //            RECONCIL.RC > 0 | TXNCNT.RC > 0 | SETCNT.RC > 0 |
 //            MATCHCT.RC > 0 | MISCT.RC > 0 | TNMCT.RC > 0 |
 //            STMCT.RC > 0 | FINALCP.RC > 0) THEN

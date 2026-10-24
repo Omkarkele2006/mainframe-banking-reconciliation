@@ -2,3 +2,11 @@
 *.log
 *.tmp
 .DS_Store
+node_modules/
+client/dist/
+server/dist/
+server/.uploads/
+.env
+.env.*
+!.env.example
+coverage/

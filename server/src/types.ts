@@ -1,0 +1,5 @@
+export type RunStatus = 'RECEIVED' | 'PREFLIGHT' | 'ALLOCATING' | 'UPLOADING' | 'SORTING' | 'DUPLICATE_CHECK' | 'VSAM_SETUP' | 'RECONCILING' | 'RETRIEVING_RESULTS' | 'EOD_VALIDATING' | 'REPORT_GENERATION' | 'CLEANUP' | 'READY_FOR_MAINFRAME' | 'SUBMITTED' | 'RUNNING' | 'COMPLETED' | 'COMPLETED_WITH_EXCEPTIONS' | 'BUSINESS_EXCEPTION' | 'FAILED' | 'NOT_CONFIGURED' | 'AWAITING_RECOVERY';
+export type TestProfile = 'SMOKE' | 'VOLUME_10K' | 'NEGATIVE';
+export interface ReconciliationSummary { transactionCount?: number; settlementCount?: number; matchedCount?: number; mismatchedCount?: number; transactionOnlyCount?: number; settlementOnlyCount?: number; transactionAmount?: number; settlementAmount?: number; validatedAmount?: number; discrepancyAmount?: number; exceptions?: Array<{ reason: string; count: number }>; }
+export interface MainframeSubmission { jobId: string; submittedAt: Date; }
+export interface MainframeExecutionAdapter { readonly configured: boolean; submit(input: { runId: string; transactionPath: string; settlementPath: string; profile: TestProfile }): Promise<MainframeSubmission>; }

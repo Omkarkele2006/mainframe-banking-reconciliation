@@ -10,6 +10,11 @@
 - Db2 (deferred persistence integration)
 - TSO/ISPF
 - JES/SDSF
+- React, Vite, TypeScript, Tailwind CSS, Express, MongoDB/Mongoose (operations console foundation)
+
+## Web console (foundation)
+
+The console is in `client/` and the API is in `server/`. See [docs/FRONTEND_AND_BACKEND.md](docs/FRONTEND_AND_BACKEND.md) for Windows setup, API routes, and limitations. The UI supports organization metadata, temporary fixed-width file uploads, run history, details, and report exports. Mainframe execution is intentionally not configured: no reconciliation or settlement is performed in the web application, and run requests never fabricate a JES job or successful result. See [docs/MAINFRAME_INTEGRATION_NEXT_STEPS.md](docs/MAINFRAME_INTEGRATION_NEXT_STEPS.md) for the z/OS integration contract.
 
 ## Team
 - Om Karkele – JCL, DFSORT, EOD, Integration

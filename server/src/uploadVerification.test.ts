@@ -28,8 +28,8 @@ async function fixture(options: { txn?: Buffer; set?: Buffer; fail?: string; wro
   };
   const remote = new Map<string, Buffer>(); const calls: string[] = []; const transferPaths: string[] = []; const uploadedBytes: Buffer[] = [];
   const adapter: SmokeAdapter = {
-    async attributes(dataset) { calls.push(`attributes:${dataset}`); if (!remote.has(dataset)) { if (options.preflightError) throw Object.assign(new Error('collision preflight inconclusive'), { code: options.preflightError }); if (options.collision && dataset === record.datasets[0]?.name) return { dsname: dataset, dsorg: 'PS', recfm: 'FB', lrecl: 38 }; throw Object.assign(new Error('dataset not found'), { code: 'DATASET_NOT_FOUND' }); } return { dsname: dataset, dsorg: 'PS', recfm: 'FB', lrecl: options.wrongAttrs ? 80 : 38 }; },
-    async create(dataset) { calls.push(`create:${dataset}`); if (options.fail === `create:${dataset}`) throw Object.assign(new Error('timeout token=hidden'), { code: 'TIMEOUT' }); if (options.fail === 'create:second' && dataset === record.datasets[1]?.name) throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); remote.set(dataset, Buffer.alloc(0)); },
+    async attributes(dataset) { calls.push(`attributes:${dataset}`); if (!remote.has(dataset)) { if (options.preflightError) throw Object.assign(new Error('collision preflight inconclusive'), { code: options.preflightError }); if (options.collision && dataset === record.datasets[0]?.name) return { dsname: dataset, dsorg: 'PS', recfm: 'FB', lrecl: 38 }; throw Object.assign(new Error('dataset not found'), { code: 'DATASET_NOT_FOUND' }); } return { dsname: dataset, dsorg: 'PS', recfm: 'FB', lrecl: options.wrongAttrs ? 80 : 38, allocationEvidence: { primarySpace: 1, secondarySpace: 1, spaceUnit: 'TRK' } }; },
+    async create(dataset, primaryTracks, secondaryTracks) { calls.push(`create:${dataset}:${primaryTracks}:${secondaryTracks}`); if (options.fail === `create:${dataset}`) throw Object.assign(new Error('timeout token=hidden'), { code: 'TIMEOUT' }); if (options.fail === 'create:second' && dataset === record.datasets[1]?.name) throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' }); remote.set(dataset, Buffer.alloc(0)); return { primaryTracks, secondaryTracks, unit: 'TRK', returned: { primarySpace: primaryTracks, secondarySpace: secondaryTracks, spaceUnit: 'TRK' } }; },
     async upload(dataset, stagedPath) { calls.push(`upload:${dataset}`); transferPaths.push(stagedPath); if (options.fail === `upload:${dataset}` || options.fail === 'upload') throw Object.assign(new Error('upload denied'), { code: 'AUTHORIZATION' }); const bytes = await fs.readFile(stagedPath); uploadedBytes.push(bytes); remote.set(dataset, bytes); },
     async download(dataset, localPath) { calls.push(`download:${dataset}`); if (options.fail === 'download') throw Object.assign(new Error('download timeout'), { code: 'TIMEOUT' }); const bytes = remote.get(dataset); if (!bytes) throw new Error('missing remote dataset'); const content = options.fail === `content:${dataset}` ? Buffer.from(`${other}\n`) : options.fail === 'count' ? Buffer.from(`${line}\n${other}\n`) : bytes; await fs.writeFile(localPath, content); },
     async delete(dataset) { calls.push(`delete:${dataset}`); if (options.cleanupFail) throw Object.assign(new Error('permission denied'), { code: 'AUTHORIZATION' }); remote.delete(dataset); },
@@ -81,6 +81,10 @@ test('completes a mocked allocation, text upload, FB/38 attribute and read-back 
     assert.equal(result.datasets.every((item) => item.state === 'CLEANED'), true);
     assert.equal(f.remote.size, 1);
     assert.ok(f.calls.some((call) => call.startsWith('upload:')));
+    assert.deepEqual(f.calls.filter((call) => call.startsWith('create:')), f.record.datasets.map((dataset) => `create:${dataset.name}:1:1`));
+    assert.deepEqual((result.stageResults.transactionAllocation as { requested: unknown; returnedAllocationEvidence: unknown; returnedDatasetSpaceEvidence: unknown }).requested, { primaryTracks: 1, secondaryTracks: 1, unit: 'TRK' });
+    assert.deepEqual((result.stageResults.transactionAllocation as { returnedAllocationEvidence: unknown }).returnedAllocationEvidence, { primarySpace: 1, secondarySpace: 1, spaceUnit: 'TRK' });
+    assert.deepEqual((result.stageResults.transactionAllocation as { returnedDatasetSpaceEvidence: unknown }).returnedDatasetSpaceEvidence, { primarySpace: 1, secondarySpace: 1, spaceUnit: 'TRK' });
     assert.ok(f.calls.some((call) => call.startsWith('download:')));
     assert.equal(f.saves.some((saved) => saved.datasets.some((dataset) => dataset.state === 'CREATED')), true);
     assert.deepEqual(f.uploadedBytes, [Buffer.from(`${line}\n`, 'ascii'), Buffer.from(`${other}\n`, 'ascii')]);
@@ -167,6 +171,37 @@ test('upload failure is persisted and cleanup remains restricted to this operati
     assert.equal(result.datasets.every((item) => item.state === 'CLEANED'), true);
     assert.equal(f.calls.filter((call) => call.startsWith('delete:')).length, 2);
     assert.doesNotMatch(JSON.stringify(safeUploadVerificationResponse(result)), /hidden|stagedPath|C:\\|staging/i);
+  } finally { await fs.rm(f.root, { recursive: true, force: true }); }
+});
+
+test('persists sanitized HTTP and IBM dataset-space evidence before manifest cleanup and keeps cleanup separate', async () => {
+  const f = await fixture();
+  let failureAtFirstDelete: Record<string, unknown> | undefined;
+  const originalDelete = f.adapter.delete;
+  f.adapter.delete = async (dataset) => {
+    if (!failureAtFirstDelete) failureAtFirstDelete = structuredClone(f.saves.at(-1)?.stageResults.failure as Record<string, unknown> | undefined);
+    await originalDelete(dataset);
+  };
+  f.adapter.upload = async () => {
+    throw Object.assign(new Error('Zowe operation failed (DATASET_SPACE_ERROR). Diagnostic: HTTP 500; EDC5065I; D37-04; errno2=0xc0440028; __last_op=151; __code=0x0d370004; fwrite() error. password=never-store-this'), {
+      code: 'DATASET_SPACE_ERROR',
+      diagnostic: 'HTTP 500; EDC5065I; D37-04; errno2=0xc0440028; __last_op=151; __code=0x0d370004; fwrite() error',
+      httpStatus: 500,
+    });
+  };
+  try {
+    const result = await executeUploadVerification(f.record, f.deps);
+    const failure = result.stageResults.failure as { stage: string; category: string; diagnostic: string; httpStatus: number };
+    assert.equal(result.stage, 'UPLOAD_TRANSACTION');
+    assert.equal(failure.stage, 'UPLOAD_TRANSACTION');
+    assert.equal(failure.category, 'DATASET_SPACE_ERROR');
+    assert.equal(failure.httpStatus, 500);
+    assert.match(failure.diagnostic, /HTTP 500.*EDC5065I.*D37-04.*fwrite\(\) error/);
+    assert.doesNotMatch(JSON.stringify(result), /never-store-this|password=/);
+    assert.equal((failureAtFirstDelete as { stage: string }).stage, 'UPLOAD_TRANSACTION');
+    assert.equal((failureAtFirstDelete as { diagnostic: string }).diagnostic, failure.diagnostic);
+    assert.deepEqual(result.stageResults.cleanup && (result.stageResults.cleanup as { status: string }).status, 'COMPLETED');
+    assert.equal(result.datasets.every((item) => item.state === 'CLEANED'), true);
   } finally { await fs.rm(f.root, { recursive: true, force: true }); }
 });
 

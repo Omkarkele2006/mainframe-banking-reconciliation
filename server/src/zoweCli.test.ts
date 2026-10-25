@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import os from 'node:os';
-import { buildWindowsZoweInvocation, buildZoweOperationArgs, createSingleFlightConnectionTest, DEFAULT_ZOWE_TIMEOUT_MS, invokeZoweOperation, resolveZoweTimeoutMs, TEST_DATASET, ZOWE_PROFILE, testZoweProfile, type ProcessResult } from './zoweCli.js';
+import { buildWindowsZoweInvocation, buildWindowsZoweSpawnInvocation, buildZoweOperationArgs, createSingleFlightConnectionTest, DEFAULT_ZOWE_TIMEOUT_MS, invokeZoweOperation, resolveZoweTimeoutMs, TEST_DATASET, ZOWE_PROFILE, testZoweProfile, type ProcessResult } from './zoweCli.js';
 import { createZoweUploadAdapter } from './zoweUploadAdapter.js';
 
 const status = JSON.stringify({
@@ -220,6 +220,24 @@ test('constructs only fixed Zowe operations and safely quotes staged paths conta
   assert.throws(()=>buildWindowsZoweInvocation(['zos-jobs','submit','bad-command','--rfj']),/Unsupported Zowe CLI invocation/);
 });
 
+test('uses verbatim Windows spawn arguments and keeps staged upload/download paths intact', () => {
+  const uploadPath = 'C:\\Users\\Operator Name\\staging area\\upload input.txt';
+  const downloadPath = 'C:\\Users\\Operator Name\\staging area\\download output.out';
+  const cases = [
+    { operation: { kind: 'uploadSequential' as const, dataset: 'Z73968.ABC12345.TXNIN', localPath: uploadPath }, expected: `zowe zos-files upload file-to-data-set "${uploadPath}" Z73968.ABC12345.TXNIN --encoding IBM-1047 --zosmf-profile zosmf --rfj` },
+    { operation: { kind: 'downloadDataset' as const, dataset: 'Z73968.ABC12345.TXNIN', localPath: downloadPath }, expected: `zowe zos-files download data-set Z73968.ABC12345.TXNIN --file "${downloadPath}" --zosmf-profile zosmf --rfj` },
+  ];
+  for (const { operation, expected } of cases) {
+    const invocation = buildWindowsZoweSpawnInvocation(buildZoweOperationArgs(operation));
+    assert.equal(invocation.executable, 'cmd.exe');
+    assert.deepEqual(invocation.args.slice(0, 2), ['/d', '/c']);
+    assert.equal(invocation.args.length, 3, 'cmd.exe receives a single intact command string');
+    assert.equal(invocation.args[2], expected);
+    assert.deepEqual(invocation.options, { windowsVerbatimArguments: true });
+    assert.equal(invocation.args[2]?.includes(operation.localPath), true);
+  }
+});
+
 test('constructs the fixed PS/FB/38 allocation command and text-mode transfer operations', () => {
   const create = buildZoweOperationArgs({ kind:'createSequential', dataset:'Z73968.UABC1234.TXNIN', primaryTracks:4, secondaryTracks:1 });
   assert.deepEqual(create,['zos-files','create','data-set-sequential','Z73968.UABC1234.TXNIN','--size','4TRK','--secondary-space','1','--record-format','FB','--record-length','38','--block-size','27968','--attributes','--zosmf-profile','zosmf','--rfj']);
@@ -233,6 +251,25 @@ test('constructs the fixed PS/FB/38 allocation command and text-mode transfer op
   assert.equal(download.includes('--binary'),false);
   assert.throws(()=>buildZoweOperationArgs({kind:'createSequential',dataset:'Z73968.BANK.TXN10K',primaryTracks:0,secondaryTracks:1}),/allocation parameters/);
   assert.throws(()=>buildWindowsZoweInvocation([...create,'--user','untrusted']),/Unsupported Zowe CLI invocation/);
+  assert.equal(create[create.indexOf('--size') + 1], '4TRK');
+  assert.equal(create[create.indexOf('--secondary-space') + 1], '1');
+  assert.equal(create.includes('--primary-space'), false, 'size explicitly sets primary allocation and its TRK unit');
+});
+
+test('preserves bounded IBM D37-04 and HTTP evidence from a failed Zowe operation without exposing raw output', async () => {
+  const response = JSON.stringify({ success:false, exitCode:8, message:'Upload failed: HTTP 500 EDC5065I A write system error was detected (errno2=0xC0440028); __amrc: __last_op=151 __code=0x0D370004; fwrite() error password=hidden', stdout:'', stderr:'', data:{ success:false } });
+  await assert.rejects(
+    () => invokeZoweOperation({ kind:'datasetAttributes', dataset:'Z73968.UABC1234.TXNIN' }, { platform:'win32', env:{ PATH:'C:\\zowe' }, locate:async()=> 'zowe.cmd', invoke:async()=>({ exitCode:8, stdout:response, stderr:'' }) }),
+    (error:unknown) => {
+      const failure = error as { code?:string; diagnostic?:string; httpStatus?:number; message:string };
+      assert.equal(failure.code, 'DATASET_SPACE_ERROR');
+      assert.equal(failure.httpStatus, 500);
+      for (const evidence of ['HTTP 500', 'EDC5065I', 'D37-04', 'errno2=0xc0440028', '__last_op=151', '__code=0x0d370004', 'fwrite() error']) assert.ok(failure.diagnostic?.includes(evidence), `missing sanitized evidence: ${evidence}`);
+      assert.match(failure.message, /DATASET_SPACE_ERROR/);
+      assert.doesNotMatch(JSON.stringify(failure), /hidden|password=|write system error/);
+      return true;
+    },
+  );
 });
 
 test('operation execution requires a successful RFJ envelope and the requested dataset resource', async () => {

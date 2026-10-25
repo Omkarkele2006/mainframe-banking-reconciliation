@@ -77,6 +77,17 @@ export function buildWindowsZoweInvocation(args: string[], commandInterpreter = 
   return { executable: commandInterpreter, args: ['/d', '/c', `zowe ${rendered}`] };
 }
 
+export function buildWindowsZoweSpawnInvocation(args: string[], commandInterpreter = 'cmd.exe'): {
+  executable: string;
+  args: string[];
+  options: { windowsVerbatimArguments: true };
+} {
+  return {
+    ...buildWindowsZoweInvocation(args, commandInterpreter),
+    options: { windowsVerbatimArguments: true },
+  };
+}
+
 function buildZoweOperationArgsFromCommand(kind: ZoweOperation['kind'], args: string[]): string[] {
   if (kind === 'createSequential' && args[0] === 'zos-files' && args[1] === 'create' && args[2] === 'data-set-sequential') {
     const value = (flag: string) => args[args.indexOf(flag) + 1] ?? '';
@@ -155,9 +166,9 @@ function invokeProcess(executable: string, args: string[], options: { timeoutMs:
   return new Promise((resolve, reject) => {
     // The only arguments passed here come from fixed command definitions below. No request data reaches a shell.
     const isWindows = process.platform === 'win32';
-    const windowsInvocation = isWindows ? buildWindowsZoweInvocation(args, options.env.ComSpec ?? options.env.COMSPEC ?? 'cmd.exe') : undefined;
+    const windowsInvocation = isWindows ? buildWindowsZoweSpawnInvocation(args, options.env.ComSpec ?? options.env.COMSPEC ?? 'cmd.exe') : undefined;
     const child = windowsInvocation
-      ? spawn(windowsInvocation.executable, windowsInvocation.args, { cwd: options.cwd, env: options.env, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
+      ? spawn(windowsInvocation.executable, windowsInvocation.args, { cwd: options.cwd, env: options.env, windowsHide: true, shell: false, ...windowsInvocation.options, stdio: ['ignore', 'pipe', 'pipe'] })
       : spawn(executable, args, { cwd: options.cwd, env: options.env, windowsHide: true, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -203,6 +214,42 @@ function parseRfj(output: string): RfjEnvelope {
 }
 
 export type ZoweOperationResult = { data: unknown; message?: string; envelope: { success: true; exitCode: 0 } };
+
+export type ZoweOperationFailure = Error & {
+  code: string;
+  diagnostic?: string;
+  httpStatus?: number;
+};
+
+function failureEvidence(text: string): { diagnostic?: string; httpStatus?: number; category?: string } {
+  const status = /\bHTTP(?:\/\d(?:\.\d)?)?\s*[: ]\s*([45]\d\d)\b/i.exec(text)?.[1]
+    ?? /\bstatus(?:\s+code)?\s*[:= ]\s*([45]\d\d)\b/i.exec(text)?.[1];
+  const markers = new Set<string>();
+  for (const match of text.matchAll(/\bEDC\d{4}[A-Z]?\b/gi)) markers.add(match[0].toUpperCase());
+  for (const match of text.matchAll(/\bD\d{2}-\d{2}\b/gi)) markers.add(match[0].toUpperCase());
+  for (const match of text.matchAll(/\berrno2\s*=\s*0x[0-9a-f]+/gi)) markers.add(match[0].replace(/\s+/g, '').toLowerCase());
+  for (const match of text.matchAll(/\b__last_op\s*=\s*\d+/gi)) markers.add(match[0].replace(/\s+/g, '').toLowerCase());
+  for (const match of text.matchAll(/\b__code\s*=\s*0x[0-9a-f]+/gi)) markers.add(match[0].replace(/\s+/g, '').toLowerCase());
+  if (/\b__code\s*=\s*0x0d370004\b/i.test(text) && !/\bD37-04\b/i.test(text)) markers.add('D37-04');
+  if (/\bfwrite\(\)\s*error\b/i.test(text)) markers.add('fwrite() error');
+  if (status) markers.add(`HTTP ${status}`);
+  const items = [...markers].slice(0, 8);
+  const normalizedStatus = status ? Number(status) : undefined;
+  const category = /\bD37-04\b/i.test(text) || /\b__code\s*=\s*0x0d370004\b/i.test(text) ? 'DATASET_SPACE_ERROR'
+    : normalizedStatus !== undefined ? 'REMOTE_HTTP_ERROR' : undefined;
+  return { ...(items.length ? { diagnostic: sanitizeText(items.join('; '), 240) } : {}), ...(normalizedStatus ? { httpStatus: normalizedStatus } : {}), ...(category ? { category } : {}) };
+}
+
+function operationFailure(category: string, raw = ''): ZoweOperationFailure {
+  const evidence = failureEvidence(raw);
+  const finalCategory = evidence.category ?? category;
+  const detail = evidence.diagnostic ? ` Diagnostic: ${evidence.diagnostic}.` : '';
+  return Object.assign(new Error(`Zowe operation failed (${finalCategory}).${detail}`), {
+    code: finalCategory,
+    ...(evidence.diagnostic ? { diagnostic: evidence.diagnostic } : {}),
+    ...(evidence.httpStatus ? { httpStatus: evidence.httpStatus } : {}),
+  });
+}
 export type ZoweOperationDependencies = Pick<ZoweDependencies, 'locate' | 'invoke' | 'timeoutMs' | 'platform' | 'env'> & { stagingRoot?: string };
 
 /** Executes one of the fixed typed operations above and returns only validated RFJ data. */
@@ -234,7 +281,7 @@ export async function invokeZoweOperation(operation: ZoweOperation, dependencies
   try { result = await invoke(invocationName, args, { timeoutMs: dependencies.timeoutMs ?? resolveZoweTimeoutMs(env), maxOutputBytes: OUTPUT_LIMIT, env: windowsEnv(env), cwd: os.homedir() }); }
   catch (error) {
     const category = safeFailureCategory(error);
-    throw Object.assign(new Error(`Zowe operation failed (${category}).`), { code: category });
+    throw operationFailure(category, (error as Error)?.message ?? '');
   }
   if (result.exitCode !== 0) {
     let detail = result.stderr;
@@ -243,12 +290,12 @@ export async function invokeZoweOperation(operation: ZoweOperation, dependencies
       detail = `${failedEnvelope.message ?? ''} ${failedEnvelope.stderr ?? ''} ${detail}`;
     } catch { /* the sanitized process failure classification also handles non-RFJ CLI output */ }
     const category = safeFailureCategory(undefined, detail);
-    throw Object.assign(new Error(`Zowe operation failed (${category}).`), { code: category });
+    throw operationFailure(category, detail);
   }
   const envelope = parseRfj(result.stdout);
   if (envelope.success !== true || envelope.exitCode !== 0) {
     const category = safeFailureCategory(undefined, `${envelope.message ?? ''} ${envelope.stderr ?? ''}`);
-    throw Object.assign(new Error(`Zowe operation failed (${category}).`), { code: category });
+    throw operationFailure(category, `${envelope.message ?? ''} ${envelope.stderr ?? ''}`);
   }
   const data = envelope.data;
   if (operation.kind === 'datasetAttributes') {

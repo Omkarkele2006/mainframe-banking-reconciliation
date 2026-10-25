@@ -17,10 +17,11 @@ export type UploadVerificationRecord = {
   stage: string; stageResults: Record<string, unknown>; errorCategory?: string; errorMessage?: string;
 };
 export type SmokeConfig = { hlq: string; jobClass: string; sourceLibrary: string; loadLibrary: string; profile: 'zosmf'; primaryTracks: { transaction: number; settlement: number } };
-export type DatasetAttributes = { dsname: string; dsorg?: string; recfm?: string; lrecl?: number };
+export type DatasetAttributes = { dsname: string; dsorg?: string; recfm?: string; lrecl?: number; allocationEvidence?: Record<string, number | string> };
+export type DatasetAllocationResult = { primaryTracks: number; secondaryTracks: number; unit: 'TRK'; returned?: Record<string, number | string> };
 export type SmokeAdapter = {
   attributes(dataset: string): Promise<DatasetAttributes>;
-  create(dataset: string, primaryTracks: number, secondaryTracks: number): Promise<void>;
+  create(dataset: string, primaryTracks: number, secondaryTracks: number): Promise<DatasetAllocationResult>;
   upload(dataset: string, stagedPath: string): Promise<void>;
   download(dataset: string, localPath: string): Promise<void>;
   delete(dataset: string): Promise<void>;
@@ -134,6 +135,8 @@ export function safeSmokeErrorMessage(error: unknown): string {
     STAGED_INPUT_CHANGED: 'Staged input is missing or no longer matches its saved size and hash.',
     DATASET_COLLISION: 'A generated test dataset already exists; no dataset was overwritten.',
     DATASET_ATTRIBUTES_MISMATCH: 'The remote dataset did not verify as PS/FB/LRECL=38.',
+    DATASET_SPACE_ERROR: 'The mainframe reported a dataset space exhaustion condition (D37-04). Review the allocation evidence and available storage before retrying.',
+    REMOTE_HTTP_ERROR: 'The remote z/OSMF operation returned an HTTP error. Review the sanitized diagnostic evidence before retrying.',
     READBACK_INVALID: 'The remote dataset read-back was missing or outside the expected size bound.',
     READBACK_COUNT_MISMATCH: 'The remote read-back record count differs from the validated upload.',
     READBACK_CONTENT_MISMATCH: 'The remote read-back records differ from the staged upload.',
@@ -160,13 +163,15 @@ function safeError(error: unknown): string { return safeSmokeErrorMessage(error)
 async function save(record: UploadVerificationRecord, deps: SmokeDependencies): Promise<void> { await deps.persist(record); }
 
 async function cleanup(record: UploadVerificationRecord, deps: SmokeDependencies): Promise<void> {
-  record.stage = 'CLEANUP';
+  record.stageResults.cleanup = { status: 'RUNNING', attemptedDatasets: [] as string[], failedDatasets: [] as string[] };
   await save(record, deps);
+  const attemptedDatasets: string[] = [];
+  const failedDatasets: string[] = [];
   for (const item of record.datasets) {
     if (item.state !== 'CREATED' && item.state !== 'CLEANUP_FAILED' && item.state !== 'CLEANING') continue;
     try {
       // A persisted manifest entry and exact generated data set name are both required.
-      item.state = 'CLEANING'; await save(record, deps);
+      attemptedDatasets.push(item.name); item.state = 'CLEANING'; await save(record, deps);
       try { await deps.adapter.attributes(item.name); }
       catch (error) {
         if (errorCategory(error) === 'DATASET_NOT_FOUND') item.state = 'ALREADY_ABSENT';
@@ -178,11 +183,18 @@ async function cleanup(record: UploadVerificationRecord, deps: SmokeDependencies
       }
     } catch (error) {
       item.state = 'CLEANUP_FAILED'; item.errorCategory = errorCategory(error);
-      const previousCleanup = record.stageResults.cleanup as Record<string, unknown> | undefined;
-      record.stageResults.cleanup = { ...(previousCleanup ?? {}), warning: `Could not confirm cleanup of ${item.name} (${item.errorCategory}).` };
+      failedDatasets.push(item.name);
     }
+    record.stageResults.cleanup = { status: 'RUNNING', attemptedDatasets: [...attemptedDatasets], failedDatasets: [...failedDatasets] };
     await save(record, deps);
   }
+  record.stageResults.cleanup = {
+    status: failedDatasets.length ? 'WARNING' : 'COMPLETED',
+    attemptedDatasets,
+    failedDatasets,
+    ...(failedDatasets.length ? { warning: `Could not confirm cleanup of ${failedDatasets.length} run-owned dataset(s).` } : {}),
+  };
+  await save(record, deps);
 }
 
 export async function retryUploadVerificationCleanup(record: UploadVerificationRecord, deps: SmokeDependencies): Promise<UploadVerificationRecord> {
@@ -221,9 +233,19 @@ export async function executeUploadVerification(record: UploadVerificationRecord
     }
     for (const item of record.datasets) {
       record.stage = `ALLOCATE_${item.kind.toUpperCase()}`; item.state = 'CREATING'; await save(record, deps);
+      const size = record[item.kind].size;
+      const primaryTracks = Math.min(MAX_TRACKS, Math.max(1, Math.ceil(size * TRACK_HEADROOM / TRACK_BYTES_3390)));
+      const secondaryTracks = 1;
+      const requestedAllocation = { primaryTracks, secondaryTracks, unit: 'TRK' as const };
+      record.stageResults[`${item.kind}Allocation`] = { status: 'REQUESTED', requested: requestedAllocation };
+      await save(record, deps);
       try {
-        const size = record[item.kind].size;
-        await deps.adapter.create(item.name, Math.min(MAX_TRACKS, Math.max(1, Math.ceil(size * TRACK_HEADROOM / TRACK_BYTES_3390))), 1);
+        const allocation = await deps.adapter.create(item.name, primaryTracks, secondaryTracks);
+        record.stageResults[`${item.kind}Allocation`] = {
+          status: 'CLI_CONFIRMED',
+          requested: requestedAllocation,
+          ...(allocation.returned ? { returnedAllocationEvidence: allocation.returned } : {}),
+        };
       } catch (error) {
         item.state = 'UNKNOWN'; item.errorCategory = errorCategory(error); await save(record, deps); throw error;
       }
@@ -234,7 +256,14 @@ export async function executeUploadVerification(record: UploadVerificationRecord
         item.errorCategory = 'DATASET_ATTRIBUTES_MISMATCH'; await save(record, deps);
         throw Object.assign(new Error(`Allocated dataset ${item.name} did not report the required PS/FB/38 attributes.`), { code: 'DATASET_ATTRIBUTES_MISMATCH' });
       }
-      record.stageResults[`${item.kind}Allocation`] = { success: true, attributes };
+      const previousAllocation = record.stageResults[`${item.kind}Allocation`] as Record<string, unknown>;
+      record.stageResults[`${item.kind}Allocation`] = {
+        ...previousAllocation,
+        status: 'VERIFIED',
+        success: true,
+        attributes,
+        ...(attributes.allocationEvidence ? { returnedDatasetSpaceEvidence: attributes.allocationEvidence } : {}),
+      };
       await save(record, deps);
     }
     for (const item of record.datasets) {
@@ -262,7 +291,10 @@ export async function executeUploadVerification(record: UploadVerificationRecord
     record.status = 'VERIFIED'; record.stage = 'VERIFIED'; await save(record, deps);
   } catch (error) {
     record.status = 'FAILED'; record.errorCategory = errorCategory(error); record.errorMessage = safeError(error);
-    record.stageResults.failure = { stage: record.stage, category: record.errorCategory, message: record.errorMessage };
+    const failure = error as { diagnostic?: unknown; httpStatus?: unknown };
+    const diagnostic = typeof failure?.diagnostic === 'string' ? sanitizeText(failure.diagnostic, 240) : undefined;
+    const httpStatus = typeof failure?.httpStatus === 'number' && Number.isInteger(failure.httpStatus) ? failure.httpStatus : undefined;
+    record.stageResults.failure = { stage: record.stage, category: record.errorCategory, message: record.errorMessage, ...(diagnostic ? { diagnostic } : {}), ...(httpStatus ? { httpStatus } : {}) };
     await save(record, deps);
   } finally {
     let localCleanupFailures = 0;

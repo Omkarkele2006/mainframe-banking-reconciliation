@@ -5,12 +5,12 @@ import { createZoweUploadAdapter } from './zoweUploadAdapter.js';
 test('maps RFJ dataset attributes and allocation into validated typed operations', async () => {
   const calls: string[][] = [];
   const responses = [
-    { success:true, exitCode:0, message:'Completed.', stdout:'', stderr:'', data:{ success:true, apiResponse:{ items:[{ dsname:'Z73968.UABC1234.TXNIN', dsorg:'PS', recfm:'FB', lrecl:'38' }] } } },
-    { success:true, exitCode:0, message:'Created.', stdout:'', stderr:'', data:{ success:true, apiResponse:{ dsname:'Z73968.UABC1234.TXNIN' } } },
+    { success:true, exitCode:0, message:'Completed.', stdout:'', stderr:'', data:{ success:true, apiResponse:{ items:[{ dsname:'Z73968.UABC1234.TXNIN', dsorg:'PS', recfm:'FB', lrecl:'38', primarySpace:'3', secondarySpace:'1', spaceUnit:'TRK' }] } } },
+    { success:true, exitCode:0, message:'Created.', stdout:'', stderr:'', data:{ success:true, apiResponse:{ dsname:'Z73968.UABC1234.TXNIN', primarySpace:3, secondarySpace:1, spaceUnit:'TRK' } } },
   ];
   const adapter = createZoweUploadAdapter({ platform:'win32', env:{ PATH:'C:\\zowe' }, locate:async()=> 'C:\\zowe\\zowe.cmd', invoke:async(_executable,args)=>{ calls.push(args); return { exitCode:0, stdout:JSON.stringify(responses.shift()), stderr:'' }; } });
-  assert.deepEqual(await adapter.attributes('Z73968.UABC1234.TXNIN'),{ dsname:'Z73968.UABC1234.TXNIN', dsorg:'PS', recfm:'FB', lrecl:38 });
-  await adapter.create('Z73968.UABC1234.TXNIN',3,1);
+  assert.deepEqual(await adapter.attributes('Z73968.UABC1234.TXNIN'),{ dsname:'Z73968.UABC1234.TXNIN', dsorg:'PS', recfm:'FB', lrecl:38, allocationEvidence:{ primarySpace:3, secondarySpace:1, spaceUnit:'TRK' } });
+  assert.deepEqual(await adapter.create('Z73968.UABC1234.TXNIN',3,1),{ primaryTracks:3, secondaryTracks:1, unit:'TRK', returned:{ primarySpace:3, secondarySpace:1, spaceUnit:'TRK' } });
   assert.equal(calls.length,2);
   assert.equal(calls[0]?.[3],'Z73968.UABC1234.TXNIN');
   assert.equal(calls[1]?.[2],'data-set-sequential');

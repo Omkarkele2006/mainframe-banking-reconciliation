@@ -3,6 +3,8 @@ import { randomBytes, randomInt } from 'node:crypto';
 const TOKEN_ALPHABET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const TOKEN_SPACE = 36 ** 7;
 const TOKEN_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+/** Project-owned reconciliation resources are isolated to the assigned personal HLQ. */
+export const PROJECT_RECONCILIATION_HLQ = 'Z73968' as const;
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 export const TRACK_BYTES_3390 = 56_664;
 export const ALLOCATION_HEADROOM = 1.25;
@@ -34,6 +36,8 @@ export type RunExecutionPlan = {
   token: string;
   jobName: string;
   config: MainframePlanConfig;
+  /** Exact validated file metadata used to size the run's input and sort datasets. */
+  inputs: { transaction: PlanInputFile; settlement: PlanInputFile };
   datasets: RunDatasets;
   allocation: {
     transactionInputTracks: number; settlementInputTracks: number;
@@ -150,10 +154,10 @@ export function buildExecutionPlanPreview(input: {
   ].map(([key, purpose, format, space]) => ({ name: plan.datasets[key as keyof RunDatasets], purpose, format, space, state: 'PLANNED_NOT_CREATED' }));
   const steps: ExecutionPlanPreview['steps'] = [
     { order: 1, name: 'Allocate run inputs', purpose: 'Allocate new run-specific PS datasets with DISP=NEW; collision check required first.', dependencies: [], jobName: plan.jobName, jcl: allocation, expectedDd: ['TXNIN: PS FB 38', 'SETIN: PS FB 38'], checks: ['IEFBR14 return code must be 0.', 'Both datasets must be absent before allocation; no overwrite is permitted.'], state: 'PLAN_ONLY' },
-    { order: 2, name: 'Transfer uploaded records', purpose: 'Future adapter transfer; preview does not upload or rewrite data.', dependencies: ['Allocate run inputs'], jobName: undefined, jcl: null, jclUnavailableReason: 'This is a future Zowe file-transfer operation, not a JCL job; transfer is not implemented.', expectedDd: ['TXNIN', 'SETIN'], checks: ['Transferred byte and record counts must match the uploaded metadata exactly.'], state: 'BLOCKED' },
+    { order: 2, name: 'Transfer and verify uploaded records', purpose: 'The run adapter uses the allowlisted Zowe text-transfer and read-back operations; preview does not upload or rewrite data.', dependencies: ['Allocate run inputs'], jobName: undefined, jcl: null, jclUnavailableReason: 'This is an allowlisted Zowe file operation rather than JCL; no remote transfer occurs in preview.', expectedDd: ['TXNIN', 'SETIN'], checks: ['Transferred byte and record counts must match the uploaded metadata exactly.'], state: 'PLAN_ONLY' },
     { order: 3, name: 'Sort and settlement duplicate preflight', purpose: 'Sort transactions using existing duplicate-elimination behavior; preserve settlement duplicates and fail before KSDS load when any duplicate key exists.', dependencies: ['Transfer uploaded records'], jobName: plan.jobName, jcl: preflight, expectedDd: ['SORTIN → SORTOUT', 'SETIN → DUPES'], checks: ['SETSORT runs only when TXNSORT RC=0; DUPSEL only when SETSORT RC=0; DUPCNT only when DUPSEL RC=0.', 'TXNSORT, SETSORT and DUPSEL require RC=0; DUPCNT RC=0 means zero duplicates and RC8 fails the preflight.', 'The backend must wait for JES OUTPUT and RC=0 before submitting any following job.', 'Actual sorted counts must be recorded; uploaded counts are not treated as post-deduplication counts.'], state: 'PLAN_ONLY' },
-    { order: 4, name: 'Dynamic REXX validation', purpose: `Validate run-specific sorted datasets with ${plan.config.sourceLibrary}(${plan.config.rexxMember}).`, dependencies: ['Sort and settlement duplicate preflight'], jobName: undefined, jcl: null, jclUnavailableReason: `${plan.config.rexxMember} is not parameterized for run-specific dataset names; no executable invocation is generated.`, expectedDd: ['TXNSORT', 'SETSORT'], checks: ['REXX return code must be 0.'], state: 'BLOCKED' },
-    { order: 5, name: 'VSAM load and COBOL reconciliation', purpose: `Create a run-specific KSDS, load unique settlement keys, then invoke ${plan.config.loadModule}.`, dependencies: ['Dynamic REXX validation'], jobName: plan.jobName, jcl: reconciliation, expectedDd: ['TRANIN · PS/FB/38', 'SETTIN · indexed VSAM KSDS, key SETTLE-ID (offset 0, length 10)', 'MATCHOUT · PS/FB/38', 'MISMOUT · PS/FB/120', 'TXNMISS · PS/FB/120', 'SETMISS · PS/FB/120'], checks: ['VSAMLOAD executes only for VSAMCRT RC=0; RECONCIL executes only for VSAMLOAD RC=0. Any nonzero code, including an unexpected pre-existing-cluster failure, blocks downstream steps.', 'The backend must wait for each submitted job’s actual JES OUTPUT status and RC=0 before advancing to another separately submitted job.', 'COBOL RC=0 is clean; RC=4 is a business exception; RC≥8 is technical failure.', 'All six COBOL counts and physical output counts must agree.'], state: 'BLOCKED' },
+    { order: 4, name: 'Validate run-specific sort outputs', purpose: 'Read back the actual generated datasets and verify record format, count, and sort ordering; do not call the checked-in REXX member because it names shared smoke datasets.', dependencies: ['Sort and settlement duplicate preflight'], jobName: undefined, jcl: null, jclUnavailableReason: 'This is a post-sort Zowe dataset read-back and validation stage, not a JCL job; no remote operation occurs in preview.', expectedDd: ['TXNSORT', 'SETSORT', 'DUPES'], checks: ['Transaction rows may be reduced by the existing SUM FIELDS=NONE policy; settlement rows remain present for duplicate detection.', 'Records must be FB/38 and ordered by the first 10 bytes; settlement duplicate evidence must be empty before VSAM creation.'], state: 'PLAN_ONLY' },
+    { order: 5, name: 'VSAM load and COBOL reconciliation', purpose: `Create a run-specific KSDS, load unique settlement keys, then invoke ${plan.config.loadModule}.`, dependencies: ['Validate run-specific sort outputs'], jobName: plan.jobName, jcl: reconciliation, expectedDd: ['TRANIN · PS/FB/38', 'SETTIN · indexed VSAM KSDS, key SETTLE-ID (offset 0, length 10)', 'MATCHOUT · PS/FB/38', 'MISMOUT · PS/FB/120', 'TXNMISS · PS/FB/120', 'SETMISS · PS/FB/120'], checks: ['VSAMLOAD executes only for VSAMCRT RC=0; RECONCIL executes only for VSAMLOAD RC=0. Any nonzero code, including an unexpected pre-existing-cluster failure, blocks downstream steps.', 'The backend must wait for each submitted job’s actual JES OUTPUT status and RC=0 before advancing to another separately submitted job.', 'COBOL RC=0 is clean; RC=4 is a business exception; RC≥8 is technical failure.', 'All six COBOL counts and physical output counts must agree.'], state: 'BLOCKED' },
     { order: 6, name: 'EOD validation and publication gate', purpose: 'Generate count comparisons from actual COBOL SYSOUT and physical output counts, then publish only if every required gate passes.', dependencies: ['VSAM load and COBOL reconciliation'], jobName: undefined, jcl: null, jclUnavailableReason: 'The COBOL report and physical output counts do not exist until a real job completes; count-specific EOD JCL cannot be formed in a preview.', expectedDd: ['TXNSORT', 'SETSORT', 'MATCHOUT', 'MISMOUT', 'TXNMISS', 'SETMISS'], checks: ['Expected values must come from this run’s actual COBOL output, never smoke-test constants.', 'Publication requires clean return codes, zero duplicate settlement keys and consistent counts.'], state: 'BLOCKED' },
   ];
   const temporary = ['TXNIN','SETIN','TXNSORT','SETSORT','DUPES','SETTLE','SETTLE_DATA','SETTLE_INDEX','MATCHOUT','MISMOUT','TXNMISS','SETMISS'] as const;
@@ -163,13 +167,13 @@ export function buildExecutionPlanPreview(input: {
     cleanupManifest: { state: 'PLANNED_NOT_CREATED', automaticCleanupEnabled: false, temporaryDatasetCandidates: temporary.map((key) => plan.datasets[key]), retainedDatasetCandidates: [plan.datasets.FINAL, plan.datasets.EODERROR], policy: 'No cleanup occurs in preview. Future cleanup must use only the exact run manifest after verified report persistence; failed-run diagnostics must be retained.' },
     limitations: [
       'This preview is non-mutating: no dataset is created, no file is transferred, no JCL is submitted, and no reconciliation is run.',
-      `Existing ${plan.config.sourceLibrary}(${plan.config.rexxMember}) hardcodes shared TXNSORT/SETSORT names; a dynamic run-specific REXX invocation is not implemented.`,
+      `Existing ${plan.config.sourceLibrary}(${plan.config.rexxMember}) hardcodes shared TXNSORT/SETSORT names; the orchestrator skips it and uses validated run-specific dataset read-back instead.`,
       'MASTER.jcl and standalone EOD_VALIDATION.jcl contain fixed baseline dataset references and five-record smoke-test assumptions; neither is used as a production-ready arbitrary-size pipeline.',
       'The generated plan templates have not been submitted or validated on z/OS. VSAM creation/load behavior and JCL syntax require mainframe-owner review.',
       `Sequential allocation uses 3390 track sizing (${TRACK_BYTES_3390} bytes/track) with 25% headroom; each upload is capped at ${MAX_UPLOAD_BYTES} bytes. VSAM space uses 50% headroom split across primary/secondary tracks. Confirm the target storage unit and site space policy before use.`,
       'Duplicate settlement keys are preserved by sort and must block VSAM loading; transaction duplicates retain the existing SUM FIELDS=NONE first-record policy.',
       'The deployed COBOL output has no financial totals; no monetary values are calculated or shown by this plan.',
-      'REXX dynamic validation, actual job/step sequencing, JES/spool retrieval, report parsing, EOD count JCL generation, publication, and cleanup remain unimplemented.',
+      'The local orchestration state machine, Zowe operation adapter, JES polling, output checks, dynamic EOD planning, persistence mapping, and manifest cleanup are implemented with offline mocks; none has been validated through a real processing job on z/OS, and the API live-execution adapter remains unconfigured.',
     ],
   };
 }
@@ -201,6 +205,7 @@ export function buildRunExecutionPlan(runId: string, config: MainframePlanConfig
   if (!/^[A-Z][A-Z0-9]{7}$/.test(token)) throw new Error('Run dataset token is invalid.');
   const hlq = assertDatasetName(config.hlq, 'HLQ');
   if (hlq.includes('.')) throw new Error('HLQ must be one approved dataset qualifier.');
+  if (hlq !== PROJECT_RECONCILIATION_HLQ) throw new Error(`Reconciliation datasets must use the assigned ${PROJECT_RECONCILIATION_HLQ} HLQ.`);
   if (!/^[0-9A-Z]$/i.test(config.jobClass)) throw new Error('Job class must be one approved character.');
   const sourceLibrary = assertDatasetName(config.sourceLibrary, 'Source library');
   const loadLibrary = assertDatasetName(config.loadLibrary, 'Load library');
@@ -213,6 +218,7 @@ export function buildRunExecutionPlan(runId: string, config: MainframePlanConfig
     token,
     jobName: token,
     config: { ...config, hlq, jobClass: config.jobClass.toUpperCase(), sourceLibrary, loadLibrary, loadModule: config.loadModule.toUpperCase(), rexxMember: config.rexxMember.toUpperCase() },
+    inputs: { transaction: { ...inputFiles.transaction }, settlement: { ...inputFiles.settlement } },
     datasets,
     allocation: { ...computeAllocation(inputFiles.transaction, inputFiles.settlement), maximumUploadBytes: MAX_UPLOAD_BYTES },
     duplicatePolicy: { transaction: 'DEDUPLICATE_BY_ID_KEEP_FIRST_AS_EXISTING_MASTER', settlement: 'FAIL_ON_DUPLICATE_KEY_BEFORE_VSAM_LOAD' },

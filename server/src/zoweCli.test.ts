@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import os from 'node:os';
-import { buildWindowsZoweInvocation, buildWindowsZoweSpawnInvocation, buildZoweOperationArgs, createSingleFlightConnectionTest, DEFAULT_ZOWE_TIMEOUT_MS, invokeZoweOperation, resolveZoweTimeoutMs, TEST_DATASET, ZOWE_PROFILE, testZoweProfile, type ProcessResult } from './zoweCli.js';
+import { buildWindowsZoweInvocation, buildWindowsZoweSpawnInvocation, buildZoweOperationArgs, createSingleFlightConnectionTest, datasetMatchesScope, DEFAULT_ZOWE_TIMEOUT_MS, invokeZoweOperation, resolveZoweTimeoutMs, TEST_DATASET, validDatasetScope, ZOWE_PROFILE, testZoweProfile, type ProcessResult } from './zoweCli.js';
 import { createZoweUploadAdapter } from './zoweUploadAdapter.js';
 
 const status = JSON.stringify({
@@ -278,6 +278,18 @@ test('operation execution requires a successful RFJ envelope and the requested d
   assert.equal((result.data as {success:boolean}).success,true);
   await assert.rejects(()=>invokeZoweOperation({kind:'datasetAttributes',dataset:'Z73968.ABC12345.TXNIN'},{platform:'win32',env:{PATH:'C:\\zowe'},locate:async()=>'zowe.cmd',invoke:async()=>ok(JSON.stringify({success:true,exitCode:0,data:{success:false,apiResponse:{items:[]}}}))}),(error:unknown)=>(error as {code?:string}).code==='RFJ_RESOURCE_INVALID');
   await assert.rejects(()=>invokeZoweOperation({kind:'datasetAttributes',dataset:'Z73968.ABC12345.TXNIN'},{platform:'win32',env:{},locate:async()=>undefined}),/unavailable/);
+});
+
+test('dataset listing is fixed to an explicit wildcard scope and rejects out-of-scope RFJ resources', async()=>{
+  const scope='Z73968.BANK.*';
+  assert.equal(validDatasetScope(scope),true);assert.equal(validDatasetScope('ZXP.PUBLIC.*'),false);assert.equal(validDatasetScope('Z73968.BANK.*.EXTRA'),false);assert.equal(validDatasetScope('*'),false);assert.equal(validDatasetScope(`Z${'.ABCDEFGH'.repeat(5)}.*`),false);assert.equal(datasetMatchesScope('z73968.bank.txn10k',scope),true);assert.equal(datasetMatchesScope('Z73968.RUN01.TXNIN',scope),false);
+  assert.deepEqual(buildZoweOperationArgs({kind:'datasetList',scope}),['zos-files','list','data-set',scope,'--zosmf-profile','zosmf','--attributes','--rfj']);
+  assert.throws(()=>buildZoweOperationArgs({kind:'datasetList',scope:'ZXP.PUBLIC.*'}),/Invalid authorized/);
+  const good=JSON.stringify({success:true,exitCode:0,data:{success:true,apiResponse:{items:[{dsname:'Z73968.BANK.TXN10K',dsorg:'PS',recfm:'FB',lrecl:38}]}}});
+  const result=await invokeZoweOperation({kind:'datasetList',scope},{platform:'win32',env:{PATH:'C:\\zowe'},locate:async()=>'zowe.cmd',invoke:async(_exe,args)=>{assert.deepEqual(args.slice(0,4),['zos-files','list','data-set',scope]);return ok(good);}});
+  assert.equal((result.data as {success:boolean}).success,true);
+  const outOfScope=JSON.stringify({success:true,exitCode:0,data:{success:true,apiResponse:{items:[{dsname:'Z73968.RUN01.TXNIN'}]}}});
+  await assert.rejects(()=>invokeZoweOperation({kind:'datasetList',scope},{platform:'win32',env:{PATH:'C:\\zowe'},locate:async()=>'zowe.cmd',invoke:async()=>ok(outOfScope)}),(error:unknown)=>(error as {code?:string}).code==='RFJ_RESOURCE_INVALID');
 });
 
 test('treats an empty successful exact-name query as absence, without quoting the remote dataset', async () => {

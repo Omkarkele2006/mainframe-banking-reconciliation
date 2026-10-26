@@ -55,6 +55,8 @@ test('creates collision-resistant run identifiers and unique valid dataset quali
   assert.notEqual(a.token, b.token);
   assert.notEqual(a.datasets.TXNIN, b.datasets.TXNIN);
   for (const dsn of Object.values(a.datasets)) {
+    assert.ok(dsn.startsWith('Z73968.'), `project dataset must stay under the assigned HLQ: ${dsn}`);
+    assert.ok(!dsn.startsWith('ZXP.PUBLIC.'), `public namespace is prohibited: ${dsn}`);
     assert.ok(dsn.length <= 44);
     assert.ok(dsn.split('.').every((qualifier) => qualifier.length <= 8));
   }
@@ -112,6 +114,24 @@ test('generates run-specific VSAM and COBOL DD mappings using the deployed contr
   for (const dd of ['MISMOUT','TXNMISS','SETMISS']) assert.match(jcl, new RegExp(`${dd}\\s+DD[\\s\\S]*LRECL=120`));
   assert.doesNotMatch(jcl, /Z73968\.BANK\./);
   assert.doesNotMatch(jcl, /DELETE/);
+});
+
+test('keeps IDCAMS VSAM creation and load controls inside their SYSIN data blocks', () => {
+  const current = plan('R1A2B3C4');
+  const jcl = generateReconciliationJcl(current);
+  const blocks = [...jcl.matchAll(/\/\/SYSIN\s+DD \*\n([\s\S]*?)\n\/\*\n(?=\/\/)/g)].map((match) => match[1]!);
+
+  assert.equal(blocks.length, 2, 'both IDCAMS steps must have terminated in-stream SYSIN data');
+  assert.match(blocks[0]!, /DEFINE CLUSTER \( -[\s\S]*NAME\(Z73968\.R1A2B3C4\.SETTLE\)[\s\S]*INDEXED KEYS\(10 0\) RECORDSIZE\(38 38\) TRACKS\(\d+ \d+\)[\s\S]*DATA \(NAME\(Z73968\.R1A2B3C4\.SETDATA\)\)[\s\S]*INDEX \(NAME\(Z73968\.R1A2B3C4\.SETIDX\)\)/);
+  assert.match(blocks[1]!, /REPRO INFILE\(INPUT\) OUTDATASET\(Z73968\.R1A2B3C4\.SETTLE\)/);
+  assert.doesNotMatch(blocks[1]!, /\bREPLACE\b/i, 'run-specific loading must not replace an existing/shared cluster');
+
+  const creationEnd = jcl.indexOf('/*', jcl.indexOf('//SYSIN    DD *'));
+  const loadStatement = jcl.indexOf('//VSAMLOAD EXEC PGM=IDCAMS');
+  const loadEnd = jcl.indexOf('/*', jcl.indexOf('//SYSIN    DD *', loadStatement));
+  const reconStatement = jcl.indexOf('//RECONCIL EXEC');
+  assert.ok(creationEnd > 0 && creationEnd < loadStatement, 'cluster definition must terminate before the next JCL statement');
+  assert.ok(loadEnd > loadStatement && loadEnd < reconStatement, 'REPRO controls must terminate before the next JCL statement');
 });
 
 test('parses actual COBOL counts and rejects missing spool or inconsistent counts', () => {
@@ -179,6 +199,11 @@ test('preview refuses invalid names instead of repairing generated configuration
     transaction: { originalName: 'a.txt', size: 200, recordCount: 5, valid: true }, settlement: { originalName: 'b.txt', size: 200, recordCount: 5, valid: true },
     config: { ...config, loadLibrary: 'Z73968.BAD-LIBRARY' }, token: 'R1A2B3C4',
   }), /valid z\/OS dataset name/);
+  assert.throws(() => buildExecutionPlanPreview({
+    runId: 'REC-20261023-0123456789ABCDEF0123', organization: { id: 'org-1', name: 'Example Bank' }, profile: 'SMOKE',
+    transaction: { originalName: 'a.txt', size: 200, recordCount: 5, valid: true }, settlement: { originalName: 'b.txt', size: 200, recordCount: 5, valid: true },
+    config: { ...config, hlq: 'ZXP' }, token: 'R1A2B3C4',
+  }), /must use the assigned Z73968 HLQ/);
 });
 
 test('input and output allocations scale deterministically through the documented upload maximum', () => {

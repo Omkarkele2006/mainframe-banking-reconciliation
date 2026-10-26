@@ -14,17 +14,30 @@ const DATASET_ARGS = ['zos-files', 'list', 'data-set', TEST_DATASET, '--zosmf-pr
 
 export type ZoweOperation =
   | { kind: 'datasetAttributes'; dataset: string }
+  | { kind: 'datasetList'; scope: string }
   | { kind: 'createSequential'; dataset: string; primaryTracks: number; secondaryTracks: number }
   | { kind: 'uploadSequential'; dataset: string; localPath: string }
   | { kind: 'submitJcl'; localPath: string }
   | { kind: 'jobStatus'; jobId: string }
   | { kind: 'jobSpool'; jobId: string }
   | { kind: 'downloadDataset'; dataset: string; localPath: string }
-  | { kind: 'deleteDataset'; dataset: string };
+  | { kind: 'deleteDataset'; dataset: string }
+  | { kind: 'deleteVsamCluster'; dataset: string };
 
 function validDatasetName(dataset: string): boolean {
   const parts = dataset.split('.');
   return dataset.length <= 44 && parts.length >= 2 && parts.every((part) => /^[A-Z#$@][A-Z0-9#$@]{0,7}$/i.test(part));
+}
+export function validDatasetScope(scope: string, authorizedHlq = 'Z73968'): boolean {
+  const parts = scope.split('.');
+  if (scope.length > 44 || parts.length < 2 || parts.at(-1) !== '*' || !parts.slice(0, -1).every((part) => /^[A-Z#$@][A-Z0-9#$@]{0,7}$/i.test(part))) return false;
+  const prefix=scope.slice(0,-2).toUpperCase();const hlq=authorizedHlq.toUpperCase();
+  return prefix===hlq||prefix.startsWith(`${hlq}.`);
+}
+export function datasetMatchesScope(dataset: string, scope: string): boolean {
+  if (!validDatasetName(dataset) || !validDatasetScope(scope)) return false;
+  const prefix = scope.slice(0, -1).toUpperCase();
+  return dataset.toUpperCase().startsWith(prefix);
 }
 function normalizeDatasetName(dataset: string): string | undefined {
   return validDatasetName(dataset) ? dataset.toUpperCase() : undefined;
@@ -38,6 +51,9 @@ export function buildZoweOperationArgs(operation: ZoweOperation): string[] {
     case 'datasetAttributes':
       if (!validDatasetName(operation.dataset)) throw new Error('Invalid data set name.');
       return ['zos-files','list','data-set',operation.dataset.toUpperCase(),'--zosmf-profile',ZOWE_PROFILE,'--attributes','--rfj'];
+    case 'datasetList':
+      if (!validDatasetScope(operation.scope)) throw new Error('Invalid authorized data set scope.');
+      return ['zos-files','list','data-set',operation.scope.toUpperCase(),'--zosmf-profile',ZOWE_PROFILE,'--attributes','--rfj'];
     case 'createSequential':
       if (!validDatasetName(operation.dataset) || !Number.isInteger(operation.primaryTracks) || operation.primaryTracks < 1 || operation.primaryTracks > 500 || !Number.isInteger(operation.secondaryTracks) || operation.secondaryTracks < 0 || operation.secondaryTracks > 500) throw new Error('Invalid sequential data set allocation parameters.');
       return ['zos-files','create','data-set-sequential',operation.dataset.toUpperCase(),'--size',`${operation.primaryTracks}TRK`,'--secondary-space',String(operation.secondaryTracks),'--record-format','FB','--record-length','38','--block-size','27968','--attributes','--zosmf-profile',ZOWE_PROFILE,'--rfj'];
@@ -52,12 +68,17 @@ export function buildZoweOperationArgs(operation: ZoweOperation): string[] {
       return ['zos-jobs','view','job-status-by-jobid',operation.jobId.toUpperCase(),'--zosmf-profile',ZOWE_PROFILE,'--rfj'];
     case 'jobSpool':
       if (!validJobId(operation.jobId)) throw new Error('Invalid JES job ID.');
-      return ['zos-jobs','view','all-spool-content-by-jobid',operation.jobId.toUpperCase(),'--zosmf-profile',ZOWE_PROFILE,'--rfj'];
+      // Zowe CLI 8.36.1 uses `all-spool-content <jobid>`; the old
+      // `all-spool-content-by-jobid` spelling is not a registered command.
+      return ['zos-jobs','view','all-spool-content',operation.jobId.toUpperCase(),'--zosmf-profile',ZOWE_PROFILE,'--rfj'];
     case 'downloadDataset':
       if (!validDatasetName(operation.dataset) || !validCommandPath(operation.localPath)) throw new Error('Invalid staged download parameters.');
       return ['zos-files','download','data-set',operation.dataset.toUpperCase(),'--file',operation.localPath,'--zosmf-profile',ZOWE_PROFILE,'--rfj'];
     case 'deleteDataset':
       if (!validDatasetName(operation.dataset)) throw new Error('Invalid data set name.');
+      return ['zos-files','delete','data-set',operation.dataset.toUpperCase(),'--for-sure','--zosmf-profile',ZOWE_PROFILE,'--rfj'];
+    case 'deleteVsamCluster':
+      if (!validDatasetName(operation.dataset) || !/^Z73968\.[A-Z][A-Z0-9]{7}\.SETTLE$/i.test(operation.dataset)) throw new Error('Invalid run-owned VSAM cluster name.');
       return ['zos-files','delete','data-set',operation.dataset.toUpperCase(),'--for-sure','--zosmf-profile',ZOWE_PROFILE,'--rfj'];
     default: throw new Error('Unsupported Zowe operation.');
   }
@@ -65,7 +86,7 @@ export function buildZoweOperationArgs(operation: ZoweOperation): string[] {
 
 export function buildWindowsZoweInvocation(args: string[], commandInterpreter = 'cmd.exe'): { executable: string; args: string[] } {
   const isAllowed = [CONNECTION_ARGS, DATASET_ARGS].some((allowed) => allowed.length === args.length && allowed.every((part, index) => part === args[index]))
-    || (['datasetAttributes','createSequential','uploadSequential','submitJcl','jobStatus','jobSpool','downloadDataset','deleteDataset'] as const).some((kind) => {
+    || (['datasetAttributes','datasetList','createSequential','uploadSequential','submitJcl','jobStatus','jobSpool','downloadDataset','deleteDataset','deleteVsamCluster'] as const).some((kind) => {
       try { return JSON.stringify(buildZoweOperationArgsFromCommand(kind,args)) === JSON.stringify(args); } catch { return false; }
     });
   if (!isAllowed) {
@@ -98,12 +119,14 @@ function buildZoweOperationArgsFromCommand(kind: ZoweOperation['kind'], args: st
   if (at < 0 || args[at + 1] !== ZOWE_PROFILE || args.at(-1) !== '--rfj') throw new Error('Invalid fixed command.');
   const command = args.slice(0, at);
   if (kind === 'datasetAttributes' && command[0] === 'zos-files' && command[1] === 'list' && command[2] === 'data-set') return buildZoweOperationArgs({kind,dataset:command[3] ?? ''});
+  if (kind === 'datasetList' && command[0] === 'zos-files' && command[1] === 'list' && command[2] === 'data-set') return buildZoweOperationArgs({kind,scope:command[3] ?? ''});
   if (kind === 'uploadSequential' && command[0] === 'zos-files' && command[1] === 'upload' && command[2] === 'file-to-data-set') return buildZoweOperationArgs({kind,localPath:command[3] ?? '',dataset:command[4] ?? ''});
   if (kind === 'submitJcl' && command[0] === 'zos-jobs' && command[1] === 'submit' && command[2] === 'local-file') return buildZoweOperationArgs({kind,localPath:command[3] ?? ''});
   if (kind === 'jobStatus' && command[0] === 'zos-jobs' && command[1] === 'view' && command[2] === 'job-status-by-jobid') return buildZoweOperationArgs({kind,jobId:command[3] ?? ''});
-  if (kind === 'jobSpool' && command[0] === 'zos-jobs' && command[1] === 'view' && command[2] === 'all-spool-content-by-jobid') return buildZoweOperationArgs({kind,jobId:command[3] ?? ''});
+  if (kind === 'jobSpool' && command[0] === 'zos-jobs' && command[1] === 'view' && command[2] === 'all-spool-content') return buildZoweOperationArgs({kind,jobId:command[3] ?? ''});
   if (kind === 'downloadDataset' && command[0] === 'zos-files' && command[1] === 'download' && command[2] === 'data-set' && command[4] === '--file') return buildZoweOperationArgs({kind,dataset:command[3] ?? '',localPath:command[5] ?? ''});
   if (kind === 'deleteDataset' && command[0] === 'zos-files' && command[1] === 'delete' && command[2] === 'data-set' && command[4] === '--for-sure') return buildZoweOperationArgs({kind,dataset:command[3] ?? ''});
+  if (kind === 'deleteVsamCluster' && command[0] === 'zos-files' && command[1] === 'delete' && command[2] === 'data-set' && command[4] === '--for-sure') return buildZoweOperationArgs({kind,dataset:command[3] ?? ''});
   throw new Error('Unsupported Zowe operation.');
 }
 
@@ -298,7 +321,7 @@ export async function invokeZoweOperation(operation: ZoweOperation, dependencies
     throw operationFailure(category, `${envelope.message ?? ''} ${envelope.stderr ?? ''}`);
   }
   const data = envelope.data;
-  if (operation.kind === 'datasetAttributes') {
+  if (operation.kind === 'datasetAttributes' || operation.kind === 'datasetList') {
     const nested = data as { success?: unknown; message?: unknown; error?: unknown; apiResponse?: { items?: unknown } } | undefined;
     const items = nested?.apiResponse?.items;
     if (nested?.success !== true || !Array.isArray(items)) {
@@ -308,18 +331,22 @@ export async function invokeZoweOperation(operation: ZoweOperation, dependencies
       const category = classified === 'CLI_ERROR' ? 'RFJ_RESOURCE_INVALID' : classified;
       throw Object.assign(new Error(`Zowe data set query failed (${category}).`), { code: category });
     }
-    const expectedName = normalizeDatasetName(operation.dataset)!;
     const returnedNames = items.map((row) => {
       if (!row || typeof row !== 'object' || Array.isArray(row) || typeof (row as { dsname?: unknown }).dsname !== 'string') return undefined;
       return normalizeDatasetName((row as { dsname: string }).dsname);
     });
+    if (operation.kind === 'datasetList') {
+      if (returnedNames.some((name) => name === undefined || !datasetMatchesScope(name, operation.scope))) throw Object.assign(new Error('Zowe data set list contained a resource outside the authorized scope.'), { code: 'RFJ_RESOURCE_INVALID' });
+    } else {
     // An empty, successful exact-name query is the only proof of absence. Any
     // unexpected row makes the result inconclusive and must stop allocation.
+    const expectedName = normalizeDatasetName(operation.dataset)!;
     if (returnedNames.some((name) => name === undefined || name !== expectedName)) {
       throw Object.assign(new Error('Zowe data set response did not verify the requested resource.'), { code: 'RFJ_RESOURCE_INVALID' });
     }
+    }
   }
-  if (operation.kind === 'uploadSequential' || operation.kind === 'deleteDataset') {
+  if (operation.kind === 'uploadSequential' || operation.kind === 'deleteDataset' || operation.kind === 'deleteVsamCluster') {
     const nested = data as { success?: unknown } | undefined;
     if (nested?.success !== true) throw Object.assign(new Error('Zowe mutation response did not confirm operation success.'), { code: 'RFJ_RESOURCE_INVALID' });
   }
@@ -336,7 +363,9 @@ export async function invokeZoweOperation(operation: ZoweOperation, dependencies
   if (operation.kind === 'jobSpool' && (!Array.isArray(data) || data.length === 0)) throw Object.assign(new Error('Zowe spool response contained no output records.'), { code: 'SPOOL_MISSING' });
   if (operation.kind === 'downloadDataset' && sourcePath) {
     const stat = await fs.lstat(sourcePath);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size === 0) throw Object.assign(new Error('Zowe download did not produce a non-empty regular file.'), { code: 'DOWNLOAD_INVALID' });
+    // A valid fixed-block output can contain zero records (for example MISMOUT
+    // on a clean run). Input/read-back validation applies its own non-empty rule.
+    if (!stat.isFile() || stat.isSymbolicLink()) throw Object.assign(new Error('Zowe download did not produce a regular file.'), { code: 'DOWNLOAD_INVALID' });
   }
   return { data, ...(envelope.message ? { message: sanitizeText(envelope.message, 160) } : {}), envelope: { success: true, exitCode: 0 } };
 }

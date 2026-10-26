@@ -1,0 +1,59 @@
+{
+  "runId": "REC-20261025-E6632DFE50E31D1C80DE",
+  "runQualifier": "S9C5PMVC",
+  "namespace": "Z73968",
+  "candidate": "reconciliation-scan-S9C5PMVC.jcl",
+  "readiness": "BLOCKED",
+  "evidenceSource": "Operator-provided z/OS observations; not independently re-queried by this application",
+  "jobScanEvidence": {
+    "jobId": "JOB04971",
+    "status": "OUTPUT",
+    "returnCode": null,
+    "interpretation": "A null return code does not establish a successful scan. Review the actual JES scan messages before recording syntax validation."
+  },
+  "datasets": {
+    "sortSourceMapping": {
+      "transaction": { "source": "Z73968.S9C5PMVC.TXNIN", "output": "Z73968.S9C5PMVC.TXNSORT", "mappingEvidence": "Local generatePreflightJcl maps the run TXNIN DD to DFSORT SORTOUT; no target execution evidence was supplied" },
+      "settlement": { "source": "Z73968.S9C5PMVC.SETIN", "output": "Z73968.S9C5PMVC.SETSORT", "mappingEvidence": "Local generatePreflightJcl maps the run SETIN DD to DFSORT SORTOUT; no target execution evidence was supplied" }
+    },
+    "TXNSORT": {
+      "name": "Z73968.S9C5PMVC.TXNSORT",
+      "required": "Present, PS/FB/LRECL=38",
+      "evidence": "Not returned by the reported Z73968.S9C5PMVC.* inventory query",
+      "readiness": "BLOCKED"
+    },
+    "SETSORT": {
+      "name": "Z73968.S9C5PMVC.SETSORT",
+      "required": "Present, PS/FB/LRECL=38",
+      "evidence": "Not returned by the reported Z73968.S9C5PMVC.* inventory query",
+      "readiness": "BLOCKED"
+    },
+    "RECONCILIATION_OUTPUTS": [
+      { "name": "Z73968.S9C5PMVC.SETTLE", "inventoryEvidence": "Not in reported run-qualifier inventory", "exactNameStatus": "NOT_RECHECKED", "requiredBeforeRun": "Absent" },
+      { "name": "Z73968.S9C5PMVC.SETDATA", "inventoryEvidence": "Not in reported run-qualifier inventory", "exactNameStatus": "NOT_RECHECKED", "requiredBeforeRun": "Absent" },
+      { "name": "Z73968.S9C5PMVC.SETIDX", "inventoryEvidence": "Not in reported run-qualifier inventory", "exactNameStatus": "NOT_RECHECKED", "requiredBeforeRun": "Absent" },
+      { "name": "Z73968.S9C5PMVC.MATCHOUT", "inventoryEvidence": "Not in reported run-qualifier inventory", "exactNameStatus": "NOT_RECHECKED", "requiredBeforeRun": "Absent" },
+      { "name": "Z73968.S9C5PMVC.MISMOUT", "inventoryEvidence": "Not in reported run-qualifier inventory", "exactNameStatus": "NOT_RECHECKED", "requiredBeforeRun": "Absent" },
+      { "name": "Z73968.S9C5PMVC.TXNMISS", "inventoryEvidence": "Not in reported run-qualifier inventory", "exactNameStatus": "NOT_RECHECKED", "requiredBeforeRun": "Absent" },
+      { "name": "Z73968.S9C5PMVC.SETMISS", "inventoryEvidence": "Not in reported run-qualifier inventory", "exactNameStatus": "NOT_RECHECKED", "requiredBeforeRun": "Absent" }
+    ]
+  },
+  "loadModule": {
+    "library": "Z73968.LOAD",
+    "libraryEvidence": "Operator confirmed the library exists",
+    "member": "RECONCIL",
+    "memberVerification": "UNVERIFIED",
+    "readiness": "BLOCKED"
+  },
+  "blockers": [
+    "TXNSORT and SETSORT are not currently present under this run qualifier.",
+    "RECONCIL load module member existence has not been verified; library existence is insufficient.",
+    "Exact-name absence checks for all generated VSAM and COBOL output datasets must run immediately before any future execution."
+  ],
+  "safety": {
+    "zoweInvokedDuringThisChange": false,
+    "jobSubmittedDuringThisChange": false,
+    "datasetsMutatedDuringThisChange": false,
+    "executionEnabled": false
+  }
+}

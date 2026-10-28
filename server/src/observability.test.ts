@@ -76,3 +76,8 @@ test('classifies upload-verification API actions as mainframe business operation
   assert.equal(classifyRoute('POST','/api/mainframe/upload-verification/preview'),'MAINFRAME_UPLOAD_VERIFICATION');
   assert.equal(classifyRoute('POST','/api/mainframe/upload-verification/abc123/start'),'MAINFRAME_UPLOAD_VERIFICATION');
 });
+
+test('classifies persisted banking input-preflight API actions as mainframe business operations', () => {
+  assert.equal(classifyRoute('POST','/api/mainframe/reconciliation-preflight'),'BANKING_INPUT_PREFLIGHT');
+  assert.equal(classifyRoute('GET','/api/mainframe/reconciliation-preflight/123e4567-e89b-12d3-a456-426614174000'),'BANKING_INPUT_PREFLIGHT');
+});

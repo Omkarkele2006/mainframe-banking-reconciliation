@@ -330,3 +330,11 @@ test('validates JES job identity and requires spool evidence rather than success
   await assert.rejects(()=>invokeZoweOperation({kind:'jobSpool',jobId:'JOB12345'},{platform:'win32',env:{},locate:async()=>'zowe',invoke:async()=>ok(JSON.stringify({success:true,exitCode:0,data:[]}))}),/no output records/);
   await assert.rejects(()=>invokeZoweOperation({kind:'jobStatus',jobId:'JOB12345'},{platform:'win32',env:{},locate:async()=>'zowe',invoke:async()=>{throw Object.assign(new Error('password=secret'),{code:'ZOWE_TIMEOUT'});}}),(error:unknown)=>{assert.match((error as Error).message,/TIMEOUT/);assert.doesNotMatch((error as Error).message,/secret/);return true;});
 });
+
+test('load-module member query is an exact fixed Zowe all-members operation', () => {
+  assert.deepEqual(buildZoweOperationArgs({kind:'datasetMemberList',dataset:'Z73968.LOAD',member:'RECONCIL'}),['zos-files','list','all-members','Z73968.LOAD','--pattern','RECONCIL','--attributes','--zosmf-profile','zosmf','--rfj']);
+  assert.throws(()=>buildZoweOperationArgs({kind:'datasetMemberList',dataset:'ZXP.PUBLIC.LOAD',member:'RECONCIL'}),/Invalid data set member query/);
+  assert.throws(()=>buildZoweOperationArgs({kind:'datasetMemberList',dataset:'Z73968.LOAD',member:'RECONCIL*'}),/Invalid data set member query/);
+  assert.throws(()=>buildZoweOperationArgs({kind:'datasetMemberList',dataset:'Z73968.SOURCE',member:'RECONCIL'}),/Invalid data set member query/);
+  assert.throws(()=>buildZoweOperationArgs({kind:'datasetMemberList',dataset:'Z73968.LOAD',member:'VALIDATE'}),/Invalid data set member query/);
+});

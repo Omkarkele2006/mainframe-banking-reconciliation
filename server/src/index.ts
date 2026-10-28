@@ -10,9 +10,9 @@ import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import mongoose from 'mongoose';
 import PDFDocument from 'pdfkit';
-import { AuditEvent, DatasetOperation, DatasetOwnership, ExecutionPlan, JobEvidence, Organization, Report, Run, SmokeJobOperation as SmokeJobOperationModel, Upload, UploadVerification } from './models.js';
-import { readiness } from './mainframe.js';
-import { auditQuery, historyQuery, organizationInput, previewInput, runInput, uploadVerificationPreviewInput, uploadVerificationStartInput, validateFixedWidthFile } from './validation.js';
+import { AuditEvent, BankingPreflight, DatasetOperation, DatasetOwnership, ExecutionPlan, JobEvidence, Organization, Report, Run, SmokeJobOperation as SmokeJobOperationModel, Upload, UploadVerification } from './models.js';
+import { readiness, reconciliationExecutionGate } from './mainframe.js';
+import { auditQuery, bankingPreflightInput, historyQuery, organizationInput, previewInput, runInput, uploadVerificationPreviewInput, uploadVerificationStartInput, validateFixedWidthFile } from './validation.js';
 import { resolveZoweTimeoutMs, runZoweConnectionTest, testZoweProfile } from './zoweCli.js';
 import { logStructured, requestObservability, sanitizeText } from './observability.js';
 import { buildExecutionPlanPreview, createRunId, MAX_UPLOAD_BYTES } from './executionPlan.js';
@@ -23,6 +23,7 @@ import { createZoweReconciliationAdapter } from './zoweReconciliationAdapter.js'
 import { datasetAllowedForRead, resolveDatasetReadScopes } from './datasetAccess.js';
 import { assertDatasetUploadableState, canonicalRecordsSha256, datasetAllowedForMutation, datasetMutationBlockers, jobSubmissionBlockers, decideDatasetRecovery, makeOwnedSequentialDataset, sameRecords, validateDatasetUpload, writeTransferCopy } from './datasetLifecycle.js';
 import { pollNoopSmokeJob, refreshNoopSmokeJob, startNoopSmokeJob, type SmokeJobOperation, type SmokeJobStore } from './smokeJobService.js';
+import { canResumeLoadModuleVerification, executeBankingPreflight, executeBankingReconciliationStage, prepareBankingPreflight, publicBankingPreflight, reconciliationContinuationDisposition, type BankingPreflight as BankingPreflightRecord, type PreflightDataset, type PreflightState } from './bankingPreflight.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '../../');
@@ -49,6 +50,18 @@ const operatorLoginLimit = rateLimit({ windowMs: 15 * 60_000, limit: 5, standard
 const uploadVerificationLimit = rateLimit({ windowMs: 15 * 60_000, limit: 3, standardHeaders: 'draft-7', legacyHeaders: false, message: { code: 'RATE_LIMITED', message: 'Too many mainframe file-transfer tests. Wait 15 minutes and try again.' } });
 const datasetMutationLimit = rateLimit({ windowMs: 15 * 60_000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false, message: { code: 'RATE_LIMITED', message: 'Too many dataset mutation attempts. Wait 15 minutes and try again.' } });
 const jobSubmissionLimit = rateLimit({ windowMs: 15 * 60_000, limit: 3, standardHeaders: 'draft-7', legacyHeaders: false, message: { code: 'RATE_LIMITED', message: 'Too many JES smoke-job submissions. Wait 15 minutes and try again.' } });
+const preflightSubmissionLimit = rateLimit({ windowMs: 15 * 60_000, limit: 3, standardHeaders: 'draft-7', legacyHeaders: false, message: { code: 'RATE_LIMITED', message: 'Too many mainframe preflight requests. Wait before starting another run.' } });
+function bankingPreflightBlockers(env:NodeJS.ProcessEnv=process.env):string[]{
+  const blockers=[...datasetMutationBlockers(env),...jobSubmissionBlockers(env)];
+  const validLibrary=(value:string|undefined)=>typeof value==='string'&&/^Z73968(?:\.[A-Z#$@][A-Z0-9#$@]{0,7}){1,4}$/.test(value.trim().toUpperCase());
+  if(!validLibrary(env.MAINFRAME_SOURCE_LIBRARY))blockers.push('MAINFRAME_SOURCE_LIBRARY must be a valid library within Z73968.');
+  if(!validLibrary(env.MAINFRAME_LOAD_LIBRARY))blockers.push('MAINFRAME_LOAD_LIBRARY must be a valid library within Z73968.');
+  if(env.MAINFRAME_RECONCILIATION_TLS_RISK_ACCEPTED!=='true')blockers.push('MAINFRAME_RECONCILIATION_TLS_RISK_ACCEPTED must be explicitly accepted for this live local-profile preflight; it does not verify certificates or enable reconciliation.');
+  return blockers;
+}
+function bankingReconciliationBlockers(env:NodeJS.ProcessEnv=process.env):string[]{
+  return [...new Set([...reconciliationExecutionGate(env,true).blockers,...datasetMutationBlockers(env),...jobSubmissionBlockers(env)])];
+}
 const asyncRoute = (fn: (req: Request, res: Response) => Promise<unknown>) => (req: Request, res: Response, next: NextFunction) => { void fn(req,res).catch(next); };
 const audit = (action: string, outcome: string, details: Record<string, unknown> = {}, runId?: string, organizationId?: string, req?: Request) => {
   const requestId = resRequestId(req);
@@ -87,6 +100,65 @@ function monitorSmokeOperation(operation: SmokeJobOperation) {
   void pollNoopSmokeJob(operation,smokeJobDependencies(),4,1500).then((updated)=>{
     logStructured(updated.state==='COMPLETED'?'info':updated.state==='FAILED'?'warn':'warn',{event:'jes.noop_smoke_poll_finished',operationId:updated.operationId,state:updated.state,jobId:updated.jobId,returnCode:updated.returnCode??null,errorCategory:updated.errorCategory});
   }).catch((error:unknown)=>logStructured('error',{event:'jes.noop_smoke_poll_failed',operationId:operation.operationId,errorCategory:safeZoweError(error).code})).finally(()=>smokePolls.delete(operation.operationId));
+}
+const PREFLIGHT_FINAL_STATES = new Set<PreflightState>(['READY_FOR_RECONCILIATION','DUPLICATES_FOUND','RECONCILIATION_BLOCKED','RECONCILIATION_FAILED','RECONCILIATION_UNRESOLVED','RECONCILIATION_COMPLETED','RECONCILIATION_COMPLETED_WITH_EXCEPTIONS','FAILED','SUBMISSION_UNCERTAIN','UNRESOLVED']);
+const RECONCILIATION_OUTPUT_ROLES=['SETTLE','SETTLE_DATA','SETTLE_INDEX','MATCHOUT','MISMOUT','TXNMISS','SETMISS'];
+async function persistBankingPreflight(operation: BankingPreflightRecord): Promise<void> {
+  const fields:Record<string,unknown>={...operation};delete fields.activeLock;
+  const update:Record<string,unknown>={$set:fields};
+  if(PREFLIGHT_FINAL_STATES.has(operation.state))update.$unset={activeLock:1};
+  const result=await BankingPreflight.updateOne({operationId:operation.operationId},update);
+  if(result.matchedCount!==1)throw new Error('Banking preflight manifest could not be persisted.');
+}
+function preflightDependencies(){
+  const uploadAdapter=createZoweUploadAdapter({timeoutMs:resolveZoweTimeoutMs(process.env),stagingRoot:uploadRoot});
+  const jesAdapter=createZoweReconciliationAdapter({timeoutMs:resolveZoweTimeoutMs(process.env),stagingRoot:uploadRoot});
+  return {
+    env:process.env,stagingRoot:uploadRoot,
+    remote:{attributes:async(dataset:string)=>await jesAdapter.datasetAttributes(dataset) as Awaited<ReturnType<typeof uploadAdapter.attributes>>,create:(dataset:string,primary:number,secondary:number)=>uploadAdapter.create(dataset,primary,secondary),upload:(dataset:string,file:string)=>uploadAdapter.upload(dataset,file),download:(dataset:string,file:string)=>uploadAdapter.download(dataset,file),submitJcl:(file:string)=>jesAdapter.submitJcl(file),jobStatus:(jobId:string)=>jesAdapter.jobStatus(jobId),jobSpool:(jobId:string)=>jesAdapter.jobSpool(jobId)},
+    persist:persistBankingPreflight,
+    ownership:async(operation:BankingPreflightRecord,item:PreflightDataset,state:PreflightDataset['state'],errorCategory?:string)=>{
+      const tracks=item.role==='TXNIN'?operation.plan.allocation.transactionInputTracks:item.role==='SETIN'?operation.plan.allocation.settlementInputTracks:item.role==='TXNSORT'?operation.plan.allocation.transactionSortTracks:item.role==='SETSORT'?operation.plan.allocation.settlementSortTracks:item.role==='DUPES'?operation.plan.allocation.duplicateTracks:item.role==='SETTLE'||item.role==='SETTLE_DATA'||item.role==='SETTLE_INDEX'?operation.plan.allocation.settlementVsamPrimaryTracks:item.role==='MATCHOUT'?operation.plan.allocation.matchTracks:item.role==='MISMOUT'?operation.plan.allocation.mismatchTracks:item.role==='TXNMISS'?operation.plan.allocation.transactionOnlyTracks:operation.plan.allocation.settlementOnlyTracks;
+      const createdByOperationId=`${operation.operationId}-${item.role}`;
+      const ownerState=state==='CREATED'||state==='ACTIVE'?'RUN_MANAGED':state==='UNCERTAIN'?'RUN_MANAGED_UNCERTAIN':state;
+      const attributes=item.role==='SETTLE'?{dsorg:'VS',recordLength:38,keyLength:10,keyOffset:0}:item.role==='SETTLE_DATA'?{componentOf:operation.plan.datasets.SETTLE,component:'DATA'}:item.role==='SETTLE_INDEX'?{componentOf:operation.plan.datasets.SETTLE,component:'INDEX'}:{dsorg:'PS',recfm:'FB',lrecl:['MISMOUT','TXNMISS','SETMISS'].includes(item.role)?120:38};
+      const secondary=item.role==='SETTLE'||item.role==='SETTLE_DATA'||item.role==='SETTLE_INDEX'?operation.plan.allocation.settlementVsamSecondaryTracks:Math.max(1,Math.ceil(tracks*0.25));
+      await DatasetOwnership.updateOne({dataset:item.name,createdByOperationId},{$set:{dataset:item.name,ownerActorId:operation.actorId,createdByOperationId,state:ownerState,attributes,allocation:{primaryTracks:tracks,secondaryTracks:secondary,unit:'TRK'},lastOperationId:operation.operationId,lastErrorCategory:errorCategory??null,...(['CREATED','ACTIVE'].includes(state)?{createdAtRemote:new Date()}: {})}},{upsert:true});
+    },
+    verifyLoadModule:(library:string,member:string)=>jesAdapter.verifyLoadModule(library,member),
+    readiness:async()=>{const result=await testZoweProfile({timeoutMs:resolveZoweTimeoutMs(process.env),log:(level,stage,details={})=>logStructured(level,{event:'mainframe.banking_preflight_readiness',stage,...details})});return {state:result.state,message:result.message};},
+  };
+}
+async function markInterruptedBankingPreflights(){
+  const pending=await BankingPreflight.find({state:{$in:['PREPARED','PREFLIGHT','ALLOCATING','UPLOADING','SORTING','VERIFYING_OUTPUTS','RECONCILIATION_PREFLIGHT','VSAM_COBOL_RUNNING']}}).limit(1000);
+  for(const operation of pending){
+    const reconciliationStage=['RECONCILIATION_PREFLIGHT','VSAM_COBOL_RUNNING'].includes(operation.state);
+    const savedStage=operation.stageResults?.reconciliation as {job?:{jobId?:string}}|undefined;
+    const reconciliationJobId=savedStage?.job?.jobId;
+    const beforeMutation=['PREPARED','PREFLIGHT','CONFIGURATION_AND_READINESS','DATASET_COLLISION_CHECK'].includes(operation.stage);
+    operation.state=reconciliationStage?'RECONCILIATION_UNRESOLVED':beforeMutation?'FAILED':operation.jobId?'UNRESOLVED':operation.stage==='PREFLIGHT_JCL_SUBMISSION'?'SUBMISSION_UNCERTAIN':'UNRESOLVED';
+    operation.errorCategory=reconciliationStage?(reconciliationJobId?'PROCESS_INTERRUPTED':'RECONCILIATION_SUBMISSION_UNCERTAIN'):operation.jobId?'PROCESS_INTERRUPTED':operation.stage==='PREFLIGHT_JCL_SUBMISSION'?'SUBMISSION_UNCERTAIN':'PROCESS_INTERRUPTED';
+    operation.errorMessage=reconciliationStage?(reconciliationJobId?`The API stopped after reconciliation JES job ${reconciliationJobId} was persisted. Inspect that job; no new submission was made.`:'The API stopped during VSAM/COBOL processing. Submission or partial dataset creation may have occurred; inspect JES and the exact run manifest before recovery.'):
+      operation.jobId?'The API stopped after a preflight JES job ID was persisted. Inspect that existing job; no new submission was made.':operation.stage==='PREFLIGHT_JCL_SUBMISSION'?'The API stopped during JES submission. Search JES for this generated job before taking further action; it will not be resubmitted.':'The API stopped during preflight. Remote resource state may be partial; inspect the exact persisted manifest before recovery.';
+    operation.completedAt=new Date();
+    await operation.save();
+    await BankingPreflight.updateOne({_id:operation._id},{$unset:{activeLock:1}});
+    await DatasetOwnership.updateMany({lastOperationId:operation.operationId,state:{$in:['CREATING','UNCERTAIN']}},{$set:{state:'RUN_MANAGED_UNCERTAIN',lastErrorCategory:'PROCESS_INTERRUPTED'}});
+    if(reconciliationStage&&Array.isArray(operation.datasets)){
+      for(const resource of operation.datasets as Array<{role?:string;name?:string;state?:string}>)if(['SETTLE','SETTLE_DATA','SETTLE_INDEX','MATCHOUT','MISMOUT','TXNMISS','SETMISS'].includes(resource.role??'')&&resource.state==='CREATING')resource.state='UNCERTAIN';
+      operation.markModified('datasets');operation.markModified('stageResults');await operation.save();
+    }
+    if(operation.stage==='UPLOAD_TXNIN'||operation.stage==='UPLOAD_SETIN'){
+      const role=operation.stage==='UPLOAD_TXNIN'?'TXNIN':'SETIN';
+      const resource=Array.isArray(operation.datasets)?operation.datasets.find((item:{role?:string})=>item.role===role):undefined;
+      if(resource&&typeof resource.name==='string'){
+        resource.state='UNCERTAIN';resource.errorCategory='PROCESS_INTERRUPTED';
+        await DatasetOwnership.updateOne({dataset:resource.name,createdByOperationId:`${operation.operationId}-${role}`,lastOperationId:operation.operationId},{$set:{state:'RUN_MANAGED_UNCERTAIN',lastErrorCategory:'PROCESS_INTERRUPTED'}});
+        operation.markModified('datasets');await operation.save();
+      }
+    }
+    await AuditEvent.create({timestamp:new Date(),actorId:operation.actorId,eventType:'BANKING_PREFLIGHT_INTERRUPTED',outcome:'ERROR',resourceReference:operation.runId,errorCategory:operation.errorCategory,errorMessage:'A preflight process was interrupted. No automatic remote retry was made.',action:'BANKING_PREFLIGHT_INTERRUPTED',runId:operation.runId,organizationId:String(operation.organizationId),details:{stage:operation.stage,state:operation.state}});
+  }
 }
 function scrubRunStoragePaths(value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
@@ -217,7 +289,7 @@ app.get('/api/mainframe/dataset-operations', requireOperator, asyncRoute(async(r
 app.get('/api/mainframe/jobs/submission-readiness', requireOperator, asyncRoute(async(req,res)=>{
   const blockers=jobSubmissionBlockers(process.env);
   await audit('JOB_SUBMISSION_READINESS_VIEWED',blockers.length?'BLOCKED':'SUCCESS',{blockerCount:blockers.length},undefined,undefined,req);
-  return res.json({enabled:blockers.length===0,approvedTemplates:['NOOP_SMOKE'],blockers,message:blockers.length?'The approved NOOP_SMOKE job is unavailable until the dedicated submission gate and job class are configured.':'Only the server-owned NOOP_SMOKE template is available. Reconciliation remains NOT_CONFIGURED.'});
+  return res.json({enabled:blockers.length===0,approvedTemplates:['NOOP_SMOKE','RUN_SCOPED_SORT_DUPLICATE_PREFLIGHT'],blockers,message:blockers.length?'Approved server-owned job actions are unavailable until the dedicated submission gate and job class are configured.':'Only server-owned NOOP_SMOKE and generated run-scoped input-preflight JCL are available. VSAM, COBOL, reconciliation and EOD remain disabled.'});
 }));
 app.post('/api/mainframe/jobs/noop-smoke', requireOperator, jobSubmissionLimit, asyncRoute(async(req,res)=>{
   if(!req.body||typeof req.body!=='object'||Array.isArray(req.body)||Object.keys(req.body).length!==0)return res.status(400).json({code:'SMOKE_JOB_BODY_REJECTED',message:'This action accepts no browser-supplied JCL, command, dataset, path, or job parameters.'});
@@ -435,6 +507,62 @@ app.post('/api/mainframe/upload-verification/:operationId/cleanup', requireOpera
   await audit('MAINFRAME_UPLOAD_TEST_CLEANUP',result.datasets.some(item=>item.state==='CLEANUP_FAILED')?'FAILED':'SUCCESS',{remainingDatasets:result.datasets.filter(item=>['CLEANUP_FAILED','UNKNOWN','CREATING'].includes(item.state)).length},result.operationId,result.organizationId,req);
   return res.json(safeUploadVerificationResponse(result));
 }));
+app.get('/api/mainframe/reconciliation-preflight/readiness',requireOperator,asyncRoute(async(req,res)=>{
+  const blockers=bankingPreflightBlockers();
+  const reconciliationBlockers=bankingReconciliationBlockers();
+  await audit('BANKING_PREFLIGHT_READINESS_VIEWED',blockers.length||reconciliationBlockers.length?'BLOCKED':'SUCCESS',{blockerCount:blockers.length,reconciliationBlockerCount:reconciliationBlockers.length},undefined,undefined,req);
+  return res.json({enabled:blockers.length===0,approvedTemplate:'RUN_SCOPED_SORT_DUPLICATE_PREFLIGHT',blockers,reconciliationEnabled:reconciliationBlockers.length===0,reconciliationBlockers,message:blockers.length?'Run input preflight is blocked by server configuration.':'The next stage is available only when its existing reconciliation, mainframe authorization, dataset-mutation, job-submission and TLS-risk gates are explicitly satisfied. EOD validation, final publication, and cleanup remain out of scope.'});
+}));
+app.get('/api/mainframe/reconciliation-preflight',requireOperator,asyncRoute(async(req,res)=>{
+  const actorId=(req as AuthRequest).actorId!;const items=await BankingPreflight.find({actorId}).select('-jcl -spoolText -inputs.transaction.stagedPath -inputs.settlement.stagedPath -inputs.transaction.sha256 -inputs.settlement.sha256 -idempotencyKey -activeLock').sort({createdAt:-1}).limit(50).lean().exec() as unknown as BankingPreflightRecord[];
+  await audit('BANKING_PREFLIGHT_HISTORY_VIEWED','SUCCESS',{count:items.length},undefined,undefined,req);return res.json({items:items.map(item=>publicBankingPreflight(item,false))});
+}));
+app.post('/api/mainframe/reconciliation-preflight',requireOperator,preflightSubmissionLimit,asyncRoute(async(req,res)=>{
+  const parsed=bankingPreflightInput.safeParse(req.body);if(!parsed.success)return res.status(400).json({code:'VALIDATION_ERROR',message:'Select an organization and its two validated staged uploads.'});
+  const actorId=(req as AuthRequest).actorId!;const idempotencyKey=req.get('Idempotency-Key')??'';
+  if(!/^[A-Za-z0-9_-]{16,128}$/.test(idempotencyKey))return res.status(400).json({code:'IDEMPOTENCY_KEY_REQUIRED',message:'A unique Idempotency-Key is required for each preflight request.'});
+  const previous=await BankingPreflight.findOne({actorId,idempotencyKey}).lean().exec() as unknown as BankingPreflightRecord|null;
+  if(previous)return res.status(200).json({...publicBankingPreflight(previous),replayed:true,message:'This idempotency key already identifies a saved preflight. No remote action was repeated.'});
+  const sameUploads=await BankingPreflight.findOne({actorId,organizationId:parsed.data.organizationId,'inputs.transaction.uploadId':parsed.data.transactionUploadId,'inputs.settlement.uploadId':parsed.data.settlementUploadId}).sort({createdAt:-1}).lean().exec() as unknown as BankingPreflightRecord|null;
+  if(sameUploads)return res.status(200).json({...publicBankingPreflight(sameUploads),replayed:true,message:'These exact staged uploads already have a persisted preflight. No second dataset allocation or job submission was attempted.'});
+  const blockers=bankingPreflightBlockers();if(blockers.length){await audit('BANKING_PREFLIGHT_STARTED','BLOCKED',{blockerCount:blockers.length},undefined,parsed.data.organizationId,req);return res.status(503).json({code:'BANKING_PREFLIGHT_DISABLED',message:'Input preflight requires the existing project dataset-mutation scope, approved job-submission gate and explicit local-profile TLS risk acknowledgement.',blockers});}
+  const {organizationId,transactionUploadId,settlementUploadId,profile}=parsed.data;
+  const [orgResult,txnResult,setResult]=await Promise.all([Organization.findOne({_id:organizationId,active:true}).select('name').lean(),Upload.findOne({uploadId:transactionUploadId,organization:organizationId,kind:'transaction'}).select('uploadId originalName size sha256 recordCount valid stagedPath').lean(),Upload.findOne({uploadId:settlementUploadId,organization:organizationId,kind:'settlement'}).select('uploadId originalName size sha256 recordCount valid stagedPath').lean()]);
+  const org=orgResult as unknown as {name:string}|null;const txn=txnResult as unknown as BankingPreflightRecord['inputs']['transaction']|null;const set=setResult as unknown as BankingPreflightRecord['inputs']['settlement']|null;
+  if(!org||!txn||!set)return res.status(400).json({code:'UPLOADS_REQUIRED',message:'Both staged uploads must belong to the selected active organization.'});
+  if(!txn.valid||!set.valid)return res.status(422).json({code:'FILE_CONTRACT_INVALID',message:'Both source files must pass the 38-byte fixed-width intake contract.'});
+  try{
+    const operation=prepareBankingPreflight({actorId,idempotencyKey,organizationId,organizationName:org.name,profile,transaction:txn as unknown as BankingPreflightRecord['inputs']['transaction'],settlement:set as unknown as BankingPreflightRecord['inputs']['settlement']},process.env);
+    try{await BankingPreflight.create(operation);}catch(error){if((error as {code?:number}).code===11000){const sameKey=await BankingPreflight.findOne({actorId,idempotencyKey}).lean().exec() as unknown as BankingPreflightRecord|null;if(sameKey)return res.status(200).json({...publicBankingPreflight(sameKey),replayed:true});return res.status(409).json({code:'PREFLIGHT_CONFLICT',message:'Another run is active for this operator or the idempotency key was already used. No second preflight was started.'});}throw error;}
+    try{await audit('BANKING_PREFLIGHT_STARTED','SUCCESS',{runId:operation.runId,profile,transactionRecords:txn.recordCount,settlementRecords:set.recordCount},operation.runId,organizationId,req);}
+    catch(error){operation.state='FAILED';operation.stage='START_AUDIT_PERSISTENCE';operation.errorCategory='AUDIT_PERSISTENCE_FAILED';operation.errorMessage='The start audit event could not be saved; no remote preflight action was started.';operation.completedAt=new Date();operation.activeLock=undefined;await persistBankingPreflight(operation);logStructured('error',{event:'mainframe.banking_preflight_audit_failed',operationId:operation.operationId,runId:operation.runId,errorCategory:'AUDIT_PERSISTENCE_FAILED',errorName:sanitizeText((error as Error)?.name??'Error',60)});return res.status(503).json({code:'AUDIT_PERSISTENCE_FAILED',message:operation.errorMessage,operationId:operation.operationId,state:operation.state});}
+    const deps=preflightDependencies();void executeBankingPreflight(operation,deps).then(async result=>{const outcome=result.state==='READY_FOR_RECONCILIATION'?'SUCCESS':result.state==='DUPLICATES_FOUND'?'ERROR':result.state==='FAILED'?'FAILED':'ERROR';await audit('BANKING_PREFLIGHT_FINISHED',outcome,{runId:result.runId,state:result.state,stage:result.stage,jobId:result.jobId,returnCode:result.returnCode??null,errorCategory:result.errorCategory},result.runId,organizationId,req);logStructured(result.state==='READY_FOR_RECONCILIATION'?'info':result.state==='DUPLICATES_FOUND'?'warn':'error',{event:'mainframe.banking_preflight_finished',operationId:result.operationId,runId:result.runId,state:result.state,stage:result.stage,jobId:result.jobId,returnCode:result.returnCode??null,errorCategory:result.errorCategory});}).catch(async error=>{const safe=safeZoweError(error);logStructured('error',{event:'mainframe.banking_preflight_persistence_failure',operationId:operation.operationId,runId:operation.runId,errorCategory:safe.code});await audit('BANKING_PREFLIGHT_FINISHED','FAILED',{runId:operation.runId,errorCategory:safe.code},operation.runId,organizationId,req);});
+    return res.status(202).json({...publicBankingPreflight(operation),message:'Run-scoped mainframe input preflight started. This does not run VSAM loading, COBOL reconciliation, EOD validation, or publication.'});
+  }catch(error){const safe=safeZoweError(error);await audit('BANKING_PREFLIGHT_STARTED','FAILED',{errorCategory:safe.code,errorMessage:safe.message},undefined,organizationId,req);return res.status(422).json({code:safe.code,message:safe.message});}
+}));
+app.get('/api/mainframe/reconciliation-preflight/:operationId',requireOperator,asyncRoute(async(req,res)=>{
+  const operationId=String(req.params.operationId);if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(operationId))return res.status(404).json({code:'PREFLIGHT_NOT_FOUND',message:'Preflight operation was not found for this operator.'});
+  const operation=await BankingPreflight.findOne({operationId,actorId:(req as AuthRequest).actorId}).lean().exec() as unknown as BankingPreflightRecord|null;
+  if(!operation)return res.status(404).json({code:'PREFLIGHT_NOT_FOUND',message:'Preflight operation was not found for this operator.'});
+  await audit('BANKING_PREFLIGHT_EVIDENCE_VIEWED',operation.errorCategory?'ERROR':'SUCCESS',{runId:operation.runId,state:operation.state,jobId:operation.jobId,returnCode:operation.returnCode??null},operation.runId,operation.organizationId,req);return res.json(publicBankingPreflight(operation));
+}));
+app.post('/api/mainframe/reconciliation-preflight/:operationId/reconciliation',requireOperator,preflightSubmissionLimit,asyncRoute(async(req,res)=>{
+  const operationId=String(req.params.operationId);if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(operationId))return res.status(404).json({code:'PREFLIGHT_NOT_FOUND',message:'Preflight operation was not found for this operator.'});
+  const actorId=(req as AuthRequest).actorId!;const prior=await BankingPreflight.findOne({operationId,actorId}).lean().exec() as unknown as BankingPreflightRecord|null;
+  if(!prior)return res.status(404).json({code:'PREFLIGHT_NOT_FOUND',message:'Preflight operation was not found for this operator.'});
+  const safeLoadModuleResume=canResumeLoadModuleVerification(prior);
+  const disposition=reconciliationContinuationDisposition(prior.state,safeLoadModuleResume);
+  if(disposition==='REPLAY')return res.status(200).json({...publicBankingPreflight(prior),replayed:true,message:'This persisted preflight has already entered the VSAM/COBOL stage. No second job was submitted.'});
+  if(disposition!=='CONTINUE')return res.status(409).json({code:'PREFLIGHT_NOT_READY',message:'The same run must have a verified RC 0 sort preflight and zero settlement duplicates before VSAM/COBOL execution.'});
+  const blockers=bankingReconciliationBlockers();if(blockers.length){await audit('BANKING_RECONCILIATION_STAGE_STARTED','BLOCKED',{runId:prior.runId,blockerCount:blockers.length},prior.runId,prior.organizationId,req);return res.status(503).json({code:'RECONCILIATION_STAGE_DISABLED',message:'VSAM/COBOL processing is disabled by the existing server-side execution gates.',blockers});}
+  const claimFilter={operationId,actorId,activeLock:{$exists:false},$or:[{state:'READY_FOR_RECONCILIATION'},...(safeLoadModuleResume?[{state:'RECONCILIATION_BLOCKED',stage:'LOAD_MODULE_VERIFICATION',errorCategory:prior.errorCategory,'stageResults.reconciliation.failure.stage':'LOAD_MODULE_VERIFICATION','stageResults.reconciliation.failure.category':prior.errorCategory,'stageResults.reconciliation.job.jobId':{$exists:false},'stageResults.reconciliation.submittedAt':{$exists:false},datasets:{$not:{$elemMatch:{role:{$in:RECONCILIATION_OUTPUT_ROLES},state:{$ne:'PLANNED'}}}}}]:[])]};
+  const locked=await BankingPreflight.findOneAndUpdate(claimFilter,{$set:{activeLock:actorId,state:'RECONCILIATION_PREFLIGHT',stage:safeLoadModuleResume?'LOAD_MODULE_RETRY_REQUESTED':'RECONCILIATION_REQUESTED'}},{new:true}).lean().exec() as unknown as BankingPreflightRecord|null;
+  if(!locked){const latest=await BankingPreflight.findOne({operationId,actorId}).lean().exec() as unknown as BankingPreflightRecord|null;return latest?res.status(200).json({...publicBankingPreflight(latest),replayed:true,message:'This run is already being advanced or has already reached a terminal VSAM/COBOL state. No duplicate submission was attempted.'}):res.status(404).json({code:'PREFLIGHT_NOT_FOUND',message:'Preflight operation was not found for this operator.'});}
+  try{await audit('BANKING_RECONCILIATION_STAGE_STARTED','SUCCESS',{runId:locked.runId,preflightJobId:locked.jobId,preflightReturnCode:locked.returnCode},locked.runId,locked.organizationId,req);}
+  catch(error){locked.state='RECONCILIATION_BLOCKED';locked.stage='START_AUDIT_PERSISTENCE';locked.errorCategory='AUDIT_PERSISTENCE_FAILED';locked.errorMessage='The stage-start audit event could not be saved; no reconciliation job was submitted.';locked.completedAt=new Date();await persistBankingPreflight(locked);logStructured('error',{event:'mainframe.banking_reconciliation_audit_failed',operationId,runId:locked.runId,errorCategory:'AUDIT_PERSISTENCE_FAILED',errorName:sanitizeText((error as Error)?.name??'Error',60)});return res.status(503).json({code:'AUDIT_PERSISTENCE_FAILED',message:locked.errorMessage,operationId,state:locked.state});}
+  const deps=preflightDependencies();void executeBankingReconciliationStage(locked,deps).then(async result=>{const outcome=result.state==='RECONCILIATION_COMPLETED'?'SUCCESS':result.state==='RECONCILIATION_COMPLETED_WITH_EXCEPTIONS'?'BUSINESS_EXCEPTION':result.state==='RECONCILIATION_BLOCKED'?'BLOCKED':result.state==='RECONCILIATION_FAILED'?'FAILED':'ERROR';const reconciliation=result.stageResults.reconciliation as {job?:{jobId?:string;returnCode?:number}}|undefined;await audit('BANKING_RECONCILIATION_STAGE_FINISHED',outcome,{runId:result.runId,state:result.state,stage:result.stage,jobId:reconciliation?.job?.jobId,returnCode:reconciliation?.job?.returnCode??null,errorCategory:result.errorCategory},result.runId,result.organizationId);logStructured(result.state==='RECONCILIATION_COMPLETED'?'info':result.state==='RECONCILIATION_COMPLETED_WITH_EXCEPTIONS'?'warn':result.state==='RECONCILIATION_BLOCKED'?'warn':'error',{event:'mainframe.banking_reconciliation_stage_finished',operationId:result.operationId,runId:result.runId,state:result.state,stage:result.stage,jobId:reconciliation?.job?.jobId,returnCode:reconciliation?.job?.returnCode??null,errorCategory:result.errorCategory});}).catch(async error=>{const safe=safeZoweError(error);logStructured('error',{event:'mainframe.banking_reconciliation_persistence_failure',operationId,runId:locked.runId,errorCategory:safe.code});await audit('BANKING_RECONCILIATION_STAGE_FINISHED','FAILED',{runId:locked.runId,errorCategory:safe.code},locked.runId,locked.organizationId);});
+  return res.status(202).json({...publicBankingPreflight(locked),message:'The VSAM/COBOL stage has started on the existing preflight run. No EOD validation, final publication, or cleanup is included.'});
+}));
 app.post('/api/runs/preview', requireOperator, asyncRoute(async (req,res) => {
   const parsed=previewInput.safeParse(req.body); if(!parsed.success) return res.status(400).json({code:'VALIDATION_ERROR',message:'Plan preview request is invalid.',issues:parsed.error.issues});
   const {organizationId,transactionUploadId,settlementUploadId,profile}=parsed.data;
@@ -514,5 +642,5 @@ app.use((error: unknown,req:Request,res:Response,next:NextFunction)=>{void next;
 mongoose.connection.on('connected',()=>logStructured('info',{event:'mongodb.connected'}));
 mongoose.connection.on('disconnected',()=>logStructured('warn',{event:'mongodb.disconnected'}));
 mongoose.connection.on('error',(error:unknown)=>logStructured('error',{event:'mongodb.connection_error',errorName:sanitizeText((error as Error)?.name??'MongoError',60)}));
-async function start(){logStructured('info',{event:'api.starting',port,environment:sanitizeText(process.env.NODE_ENV??'development',40)});const invalid:string[]=[];if(!Number.isInteger(port)||port<1||port>65535)invalid.push('PORT must be an integer from 1 to 65535');if(!Number.isInteger(maxBytes)||maxBytes<1)invalid.push('MAX_UPLOAD_BYTES must be a positive integer');if(process.env.MAINFRAME_ENDPOINT){try{const endpoint=new URL(process.env.MAINFRAME_ENDPOINT);if(endpoint.protocol!=='https:'||endpoint.username||endpoint.password||endpoint.search||endpoint.hash)invalid.push('MAINFRAME_ENDPOINT must be an HTTPS origin without credentials, query, or fragment');}catch{invalid.push('MAINFRAME_ENDPOINT must be a valid HTTPS URL');}}let timeout=45_000;try{timeout=resolveZoweTimeoutMs(process.env);}catch{invalid.push('ZOWE_CLI_TIMEOUT_MS must be an integer between 1000 and 60000');}if(process.env.MAINFRAME_ENABLED==='true'||process.env.MAINFRAME_AUTH_READY==='true')logStructured('warn',{event:'configuration.execution_flags',mainframeEnabled:process.env.MAINFRAME_ENABLED==='true',authorizationReady:process.env.MAINFRAME_AUTH_READY==='true',message:'Execution flags are set, but no execution adapter is configured; live execution remains unavailable.'});if(invalid.length){logStructured('error',{event:'configuration.invalid',issues:invalid});throw new Error('Invalid server configuration.');}logStructured('info',{event:'configuration.validated',mongodbConfigured:Boolean(process.env.MONGODB_URI),mainframeEndpointConfigured:Boolean(process.env.MAINFRAME_ENDPOINT),zoweProfile:'zosmf',zoweTimeoutMs:timeout,liveExecutionEnabled:false});await fs.mkdir(uploadRoot,{recursive:true});await cleanupStaging();setInterval(()=>void cleanupStaging(),60*60*1000).unref();if(process.env.MONGODB_URI){await mongoose.connect(process.env.MONGODB_URI);await markInterruptedDatasetOperations();await markInterruptedSmokeSubmissions();}else logStructured('warn',{event:'configuration.mongodb_missing',message:'MONGODB_URI is unset; persistence APIs require MongoDB.'});app.listen(port,()=>logStructured('info',{event:'api.listening',port}));}
+async function start(){logStructured('info',{event:'api.starting',port,environment:sanitizeText(process.env.NODE_ENV??'development',40)});const invalid:string[]=[];if(!Number.isInteger(port)||port<1||port>65535)invalid.push('PORT must be an integer from 1 to 65535');if(!Number.isInteger(maxBytes)||maxBytes<1)invalid.push('MAX_UPLOAD_BYTES must be a positive integer');if(process.env.MAINFRAME_ENDPOINT){try{const endpoint=new URL(process.env.MAINFRAME_ENDPOINT);if(endpoint.protocol!=='https:'||endpoint.username||endpoint.password||endpoint.search||endpoint.hash)invalid.push('MAINFRAME_ENDPOINT must be an HTTPS origin without credentials, query, or fragment');}catch{invalid.push('MAINFRAME_ENDPOINT must be a valid HTTPS URL');}}let timeout=45_000;try{timeout=resolveZoweTimeoutMs(process.env);}catch{invalid.push('ZOWE_CLI_TIMEOUT_MS must be an integer between 1000 and 60000');}if(process.env.MAINFRAME_ENABLED==='true'||process.env.MAINFRAME_AUTH_READY==='true')logStructured('warn',{event:'configuration.execution_flags',mainframeEnabled:process.env.MAINFRAME_ENABLED==='true',authorizationReady:process.env.MAINFRAME_AUTH_READY==='true',message:'Execution flags are set, but no execution adapter is configured; live execution remains unavailable.'});if(invalid.length){logStructured('error',{event:'configuration.invalid',issues:invalid});throw new Error('Invalid server configuration.');}logStructured('info',{event:'configuration.validated',mongodbConfigured:Boolean(process.env.MONGODB_URI),mainframeEndpointConfigured:Boolean(process.env.MAINFRAME_ENDPOINT),zoweProfile:'zosmf',zoweTimeoutMs:timeout,liveExecutionEnabled:false});await fs.mkdir(uploadRoot,{recursive:true});await cleanupStaging();setInterval(()=>void cleanupStaging(),60*60*1000).unref();if(process.env.MONGODB_URI){await mongoose.connect(process.env.MONGODB_URI);await markInterruptedDatasetOperations();await markInterruptedSmokeSubmissions();await markInterruptedBankingPreflights();}else logStructured('warn',{event:'configuration.mongodb_missing',message:'MONGODB_URI is unset; persistence APIs require MongoDB.'});app.listen(port,()=>logStructured('info',{event:'api.listening',port}));}
 void start().catch((error:unknown)=>{logStructured('error',{event:'api.start_failed',errorName:sanitizeText((error as Error)?.name??'Error',60),errorMessage:sanitizeText((error as Error)?.message??'Server startup failed.')});process.exitCode=1;});

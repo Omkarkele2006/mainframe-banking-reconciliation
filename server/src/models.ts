@@ -50,11 +50,23 @@ const smokeJobOperationSchema = new Schema({
   errorMessage: String,
 }, { timestamps: true, minimize: false });
 smokeJobOperationSchema.index({ actorId: 1, idempotencyKey: 1 }, { unique: true });
+const bankingPreflightSchema = new Schema({
+  operationId:{type:String,required:true,unique:true,index:true}, runId:{type:String,required:true,unique:true,index:true},
+  actorId:{type:String,required:true,index:true}, idempotencyKey:{type:String,required:true}, activeLock:{type:String,unique:true,sparse:true,index:true},
+  organizationId:{type:Schema.Types.ObjectId,ref:'Organization',required:true,index:true}, organizationName:{type:String,required:true},
+  state:{type:String,enum:['PREPARED','PREFLIGHT','ALLOCATING','UPLOADING','SORTING','VERIFYING_OUTPUTS','READY_FOR_RECONCILIATION','DUPLICATES_FOUND','RECONCILIATION_PREFLIGHT','VSAM_COBOL_RUNNING','RECONCILIATION_BLOCKED','RECONCILIATION_FAILED','RECONCILIATION_UNRESOLVED','RECONCILIATION_COMPLETED','RECONCILIATION_COMPLETED_WITH_EXCEPTIONS','FAILED','SUBMISSION_UNCERTAIN','UNRESOLVED'],required:true,index:true},
+  stage:{type:String,required:true}, profile:{type:String,enum:['SMOKE','VOLUME_10K','NEGATIVE'],required:true},
+  inputs:{type:Schema.Types.Mixed,required:true}, runQualifier:{type:String,required:true}, plan:{type:Schema.Types.Mixed,required:true}, jcl:{type:String,required:true}, reconciliationJcl:String,
+  datasets:{type:[Schema.Types.Mixed],required:true}, stageResults:{type:Schema.Types.Mixed,default:{}},
+  jobId:{type:String,index:true},jobStatus:String,returnCode:{type:Number,default:null},conditionCode:String,spoolText:{type:String,maxlength:1048576},
+  submittedAt:Date,lastCheckedAt:Date,completedAt:Date,errorCategory:String,errorMessage:String,createdAt:{type:Date,default:Date.now,index:true},updatedAt:Date,
+},{timestamps:true,minimize:false});
+bankingPreflightSchema.index({actorId:1,idempotencyKey:1},{unique:true});
 const datasetOwnershipSchema = new Schema({
   dataset: { type: String, required: true, unique: true, uppercase: true, index: true },
   ownerActorId: { type: String, required: true, index: true },
   createdByOperationId: { type: String, required: true, unique: true },
-  state: { type: String, enum: ['CREATING','CREATED','ACTIVE','UPLOADING','DELETING','DELETED','UNCERTAIN'], required: true, index: true },
+  state: { type: String, enum: ['PLANNED','CREATING','CREATED','ACTIVE','UPLOADING','DELETING','DELETED','UNCERTAIN','RUN_MANAGED','RUN_MANAGED_UNCERTAIN'], required: true, index: true },
   attributes: { type: Schema.Types.Mixed, required: true },
   allocation: { type: Schema.Types.Mixed, required: true },
   lastOperationId: String,
@@ -105,6 +117,7 @@ export const ExecutionPlan = mongoose.models.ExecutionPlan ?? mongoose.model('Ex
 export const UploadVerification = mongoose.models.UploadVerification ?? mongoose.model('UploadVerification', uploadVerificationSchema);
 export const JobEvidence = mongoose.models.JobEvidence ?? mongoose.model('JobEvidence', jobEvidenceSchema);
 export const SmokeJobOperation = mongoose.models.SmokeJobOperation ?? mongoose.model('SmokeJobOperation', smokeJobOperationSchema);
+export const BankingPreflight = mongoose.models.BankingPreflight ?? mongoose.model('BankingPreflight', bankingPreflightSchema);
 export const DatasetOwnership = mongoose.models.DatasetOwnership ?? mongoose.model('DatasetOwnership', datasetOwnershipSchema);
 export const DatasetOperation = mongoose.models.DatasetOperation ?? mongoose.model('DatasetOperation', datasetOperationSchema);
 export const AuditEvent = mongoose.models.AuditEvent ?? mongoose.model('AuditEvent', auditSchema);

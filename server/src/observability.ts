@@ -35,6 +35,7 @@ export function classifyRoute(method: string, path: string): string {
   const route = path.split('?')[0] ?? path;
   if (route === '/api/mainframe/connection-test') return 'MAINFRAME_CONNECTION_TEST';
   if (route.startsWith('/api/mainframe/upload-verification')) return 'MAINFRAME_UPLOAD_VERIFICATION';
+  if (route.startsWith('/api/mainframe/reconciliation-preflight')) return 'BANKING_INPUT_PREFLIGHT';
   if (route.startsWith('/api/uploads/')) return 'UPLOAD';
   if (route === '/api/runs' && method === 'POST') return 'RECONCILIATION_ATTEMPT';
   if (route.includes('/export.')) return 'REPORT_DOWNLOAD';
@@ -46,7 +47,7 @@ export function classifyRoute(method: string, path: string): string {
 }
 function resourceFor(path: string): string {
   const route = path.split('?')[0] ?? path;
-  const safe = route.match(/^\/api\/(?:runs|uploads|mainframe\/upload-verification)\/([A-Za-z0-9_-]{1,100})(?:\/|$)/);
+  const safe = route.match(/^\/api\/(?:runs|uploads|mainframe\/(?:upload-verification|reconciliation-preflight))\/([A-Za-z0-9_-]{1,100})(?:\/|$)/);
   if (safe?.[1]) return safe[1];
   if (route.startsWith('/api/organizations')) return 'organizations';
   if (route.startsWith('/api/mainframe/')) return 'mainframe';

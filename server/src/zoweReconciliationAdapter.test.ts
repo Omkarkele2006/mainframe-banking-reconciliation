@@ -14,6 +14,47 @@ test('uses the installed Zowe CLI 8.36.1 JES spool command syntax', () => {
   assert.throws(() => buildZoweOperationArgs({ kind: 'deleteVsamCluster', dataset: 'Z73968.BANK.RECON.REF.KSDS' }), /run-owned VSAM cluster/);
 });
 
+test('load module is verified only when an exact member appears in the RFJ all-members result', async () => {
+  const calls:string[][]=[];
+  const adapter=createZoweReconciliationAdapter({locate:async()=>'zowe',invoke:async(_exe,args)=>{calls.push(args);return ok({success:true,apiResponse:{items:[{member:'RECONCIL',version:'1'}]}});}});
+  const found=await adapter.verifyLoadModule('Z73968.LOAD','RECONCIL');
+  assert.equal(found.verified,true);
+  assert.deepEqual(calls[0],['zos-files','list','all-members','Z73968.LOAD','--pattern','RECONCIL','--attributes','--zosmf-profile','zosmf','--rfj']);
+  const missing=createZoweReconciliationAdapter({locate:async()=>'zowe',invoke:async()=>ok({success:true,apiResponse:{items:[]}})});
+  assert.equal((await missing.verifyLoadModule('Z73968.LOAD','RECONCIL')).verified,false);
+  const inconclusive=createZoweReconciliationAdapter({locate:async()=>'zowe',invoke:async()=>ok({success:true,apiResponse:{items:[{member:'OTHER'}]}})});
+  await assert.rejects(()=>inconclusive.verifyLoadModule('Z73968.LOAD','RECONCIL'),/exact member/);
+});
+
+test('normalizes the captured RFJ load-member envelope and fails closed on non-success or ambiguous evidence', async () => {
+  const captured = { success: true, exitCode: 0, message: 'completed', stdout: '', stderr: '', data: { success: true, apiResponse: { items: [{ member: 'RECONCIL', ac: '00', amode: '31', rmode: 'ANY', size: '00004874', ttr: '00001E' }], returnedRows: 1 } } };
+  const invokeResponse = (response: unknown, processExitCode = 0) => ({ exitCode: processExitCode, stdout: JSON.stringify(response), stderr: '' });
+  const exact = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse(captured) });
+  assert.equal((await exact.verifyLoadModule('Z73968.LOAD', 'RECONCIL')).verified, true);
+  const nestedData = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse({ success: true, exitCode: 0, data: { success: true, exitCode: 0, data: captured.data } }) });
+  assert.equal((await nestedData.verifyLoadModule('Z73968.LOAD', 'RECONCIL')).verified, true);
+
+  const nestedFailure = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse({ ...captured, data: { ...captured.data, success: false } }) });
+  await assert.rejects(() => nestedFailure.verifyLoadModule('Z73968.LOAD', 'RECONCIL'), /unsuccessful nested result/);
+  const apiFailure = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse({ ...captured, data: { success: true, apiResponse: { success: false, items: [{ member: 'RECONCIL' }], returnedRows: 1 } } }) });
+  await assert.rejects(() => apiFailure.verifyLoadModule('Z73968.LOAD', 'RECONCIL'), /API response was unsuccessful/);
+  const outerFailure = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse({ ...captured, success: false }) });
+  await assert.rejects(() => outerFailure.verifyLoadModule('Z73968.LOAD', 'RECONCIL'));
+  const wrongMember = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse({ ...captured, data: { success: true, apiResponse: { items: [{ member: 'OTHER' }], returnedRows: 1 } } }) });
+  await assert.rejects(() => wrongMember.verifyLoadModule('Z73968.LOAD', 'RECONCIL'), /exact member/);
+  const malformedMember = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse({ ...captured, data: { success: true, apiResponse: { items: [{ ac: '00' }], returnedRows: 1 } } }) });
+  await assert.rejects(() => malformedMember.verifyLoadModule('Z73968.LOAD', 'RECONCIL'), /exact member/);
+  const missingMember = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse({ ...captured, data: { success: true, apiResponse: { items: [], returnedRows: 0 } } }) });
+  assert.equal((await missingMember.verifyLoadModule('Z73968.LOAD', 'RECONCIL')).verified, false);
+  const inconsistentRows = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse({ ...captured, data: { success: true, apiResponse: { items: [{ member: 'RECONCIL' }], returnedRows: 2 } } }) });
+  await assert.rejects(() => inconsistentRows.verifyLoadModule('Z73968.LOAD', 'RECONCIL'), /consistent item list/);
+  const nonzero = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse(captured, 8) });
+  await assert.rejects(() => nonzero.verifyLoadModule('Z73968.LOAD', 'RECONCIL'));
+  const malformed = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => ({ exitCode: 0, stdout: '{bad json', stderr: '' }) });
+  await assert.rejects(() => malformed.verifyLoadModule('Z73968.LOAD', 'RECONCIL'), /malformed machine-readable output/);
+  await assert.rejects(() => exact.verifyLoadModule('Z73968.OTHER', 'RECONCIL'), /Only the configured/);
+});
+
 test('validates scoped dataset-list RFJ rows and returns only supported attributes',async()=>{
   const adapter=createZoweReconciliationAdapter({locate:async()=>'zowe',invoke:async(_exe,args)=>{assert.deepEqual(args,['zos-files','list','data-set','Z73968.BANK.*','--zosmf-profile','zosmf','--attributes','--rfj']);return ok({success:true,apiResponse:{items:[{dsname:'Z73968.BANK.TXN10K',dsorg:'PS',recfm:'FB',lrecl:'38',secret:'ignored'}]}});}});
   assert.deepEqual(await adapter.listDatasets('Z73968.BANK.*'),[{dsname:'Z73968.BANK.TXN10K',dsorg:'PS',recfm:'FB',lrecl:38}]);

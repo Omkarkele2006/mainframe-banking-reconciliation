@@ -14,6 +14,7 @@ const DATASET_ARGS = ['zos-files', 'list', 'data-set', TEST_DATASET, '--zosmf-pr
 
 export type ZoweOperation =
   | { kind: 'datasetAttributes'; dataset: string }
+  | { kind: 'datasetMemberList'; dataset: string; member: string }
   | { kind: 'datasetList'; scope: string }
   | { kind: 'createSequential'; dataset: string; primaryTracks: number; secondaryTracks: number }
   | { kind: 'uploadSequential'; dataset: string; localPath: string }
@@ -51,6 +52,9 @@ export function buildZoweOperationArgs(operation: ZoweOperation): string[] {
     case 'datasetAttributes':
       if (!validDatasetName(operation.dataset)) throw new Error('Invalid data set name.');
       return ['zos-files','list','data-set',operation.dataset.toUpperCase(),'--zosmf-profile',ZOWE_PROFILE,'--attributes','--rfj'];
+    case 'datasetMemberList':
+      if (operation.dataset.toUpperCase() !== 'Z73968.LOAD' || operation.member.toUpperCase() !== 'RECONCIL') throw new Error('Invalid data set member query.');
+      return ['zos-files','list','all-members',operation.dataset.toUpperCase(),'--pattern',operation.member.toUpperCase(),'--attributes','--zosmf-profile',ZOWE_PROFILE,'--rfj'];
     case 'datasetList':
       if (!validDatasetScope(operation.scope)) throw new Error('Invalid authorized data set scope.');
       return ['zos-files','list','data-set',operation.scope.toUpperCase(),'--zosmf-profile',ZOWE_PROFILE,'--attributes','--rfj'];
@@ -86,7 +90,7 @@ export function buildZoweOperationArgs(operation: ZoweOperation): string[] {
 
 export function buildWindowsZoweInvocation(args: string[], commandInterpreter = 'cmd.exe'): { executable: string; args: string[] } {
   const isAllowed = [CONNECTION_ARGS, DATASET_ARGS].some((allowed) => allowed.length === args.length && allowed.every((part, index) => part === args[index]))
-    || (['datasetAttributes','datasetList','createSequential','uploadSequential','submitJcl','jobStatus','jobSpool','downloadDataset','deleteDataset','deleteVsamCluster'] as const).some((kind) => {
+    || (['datasetAttributes','datasetMemberList','datasetList','createSequential','uploadSequential','submitJcl','jobStatus','jobSpool','downloadDataset','deleteDataset','deleteVsamCluster'] as const).some((kind) => {
       try { return JSON.stringify(buildZoweOperationArgsFromCommand(kind,args)) === JSON.stringify(args); } catch { return false; }
     });
   if (!isAllowed) {
@@ -119,6 +123,7 @@ function buildZoweOperationArgsFromCommand(kind: ZoweOperation['kind'], args: st
   if (at < 0 || args[at + 1] !== ZOWE_PROFILE || args.at(-1) !== '--rfj') throw new Error('Invalid fixed command.');
   const command = args.slice(0, at);
   if (kind === 'datasetAttributes' && command[0] === 'zos-files' && command[1] === 'list' && command[2] === 'data-set') return buildZoweOperationArgs({kind,dataset:command[3] ?? ''});
+  if (kind === 'datasetMemberList' && command[0] === 'zos-files' && command[1] === 'list' && command[2] === 'all-members' && command[4] === '--pattern' && command[6] === '--attributes') return buildZoweOperationArgs({kind,dataset:command[3] ?? '',member:command[5] ?? ''});
   if (kind === 'datasetList' && command[0] === 'zos-files' && command[1] === 'list' && command[2] === 'data-set') return buildZoweOperationArgs({kind,scope:command[3] ?? ''});
   if (kind === 'uploadSequential' && command[0] === 'zos-files' && command[1] === 'upload' && command[2] === 'file-to-data-set') return buildZoweOperationArgs({kind,localPath:command[3] ?? '',dataset:command[4] ?? ''});
   if (kind === 'submitJcl' && command[0] === 'zos-jobs' && command[1] === 'submit' && command[2] === 'local-file') return buildZoweOperationArgs({kind,localPath:command[3] ?? ''});
@@ -236,6 +241,33 @@ function parseRfj(output: string): RfjEnvelope {
   return envelope as RfjEnvelope;
 }
 
+function normalizeMemberListData(value: unknown, requestedMember: string): { success: true; apiResponse: { items: unknown[]; returnedRows?: number } } {
+  let current: unknown = value;
+  for (let depth = 0; depth < 3; depth++) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) break;
+    const row = current as Record<string, unknown>;
+    if (Object.hasOwn(row, 'success') && row.success !== true) throw Object.assign(new Error('Zowe member query contained an unsuccessful nested result.'), { code: 'RFJ_RESOURCE_INVALID' });
+    if (Object.hasOwn(row, 'exitCode') && row.exitCode !== 0) throw Object.assign(new Error('Zowe member query contained a nonzero nested exit code.'), { code: 'RFJ_RESOURCE_INVALID' });
+    if (Object.hasOwn(row, 'apiResponse')) {
+      const response = row.apiResponse;
+      if (!response || typeof response !== 'object' || Array.isArray(response)) throw Object.assign(new Error('Zowe member query API response was malformed.'), { code: 'RFJ_RESOURCE_INVALID' });
+      const api = response as Record<string, unknown>;
+      if (Object.hasOwn(api, 'success') && api.success !== true) throw Object.assign(new Error('Zowe member query API response was unsuccessful.'), { code: 'RFJ_RESOURCE_INVALID' });
+      if (!Array.isArray(api.items) || (api.returnedRows !== undefined && (!Number.isInteger(api.returnedRows) || api.returnedRows !== api.items.length))) throw Object.assign(new Error('Zowe member query did not return a consistent item list.'), { code: 'RFJ_RESOURCE_INVALID' });
+      if (api.items.length > 1) throw Object.assign(new Error('Zowe member query returned an ambiguous item list.'), { code: 'RFJ_RESOURCE_INVALID' });
+      for (const item of api.items) {
+        if (!item || typeof item !== 'object' || Array.isArray(item) || typeof (item as { member?: unknown }).member !== 'string' || (item as { member: string }).member.toUpperCase() !== requestedMember.toUpperCase()) {
+          throw Object.assign(new Error('Zowe member list did not verify the requested exact member.'), { code: 'RFJ_RESOURCE_INVALID' });
+        }
+      }
+      return { success: true, apiResponse: { items: api.items, ...(api.returnedRows === undefined ? {} : { returnedRows: api.returnedRows as number }) } };
+    }
+    if (!Object.hasOwn(row, 'data')) break;
+    current = row.data;
+  }
+  throw Object.assign(new Error('Zowe member query response did not contain a validated API item list.'), { code: 'RFJ_RESOURCE_INVALID' });
+}
+
 export type ZoweOperationResult = { data: unknown; message?: string; envelope: { success: true; exitCode: 0 } };
 
 export type ZoweOperationFailure = Error & {
@@ -320,8 +352,9 @@ export async function invokeZoweOperation(operation: ZoweOperation, dependencies
     const category = safeFailureCategory(undefined, `${envelope.message ?? ''} ${envelope.stderr ?? ''}`);
     throw operationFailure(category, `${envelope.message ?? ''} ${envelope.stderr ?? ''}`);
   }
-  const data = envelope.data;
-  if (operation.kind === 'datasetAttributes' || operation.kind === 'datasetList') {
+  let data = envelope.data;
+  if (operation.kind === 'datasetMemberList') data = normalizeMemberListData(data, operation.member);
+  if (operation.kind === 'datasetAttributes' || operation.kind === 'datasetList' || operation.kind === 'datasetMemberList') {
     const nested = data as { success?: unknown; message?: unknown; error?: unknown; apiResponse?: { items?: unknown } } | undefined;
     const items = nested?.apiResponse?.items;
     if (nested?.success !== true || !Array.isArray(items)) {
@@ -335,7 +368,14 @@ export async function invokeZoweOperation(operation: ZoweOperation, dependencies
       if (!row || typeof row !== 'object' || Array.isArray(row) || typeof (row as { dsname?: unknown }).dsname !== 'string') return undefined;
       return normalizeDatasetName((row as { dsname: string }).dsname);
     });
-    if (operation.kind === 'datasetList') {
+    if (operation.kind === 'datasetMemberList') {
+      const exact = (data as { apiResponse?: { items?: unknown[] } }).apiResponse!.items!;
+      for (const row of exact) {
+        if (!row || typeof row !== 'object' || Array.isArray(row) || typeof (row as { member?: unknown }).member !== 'string' || (row as { member: string }).member.toUpperCase() !== operation.member.toUpperCase()) {
+          throw Object.assign(new Error('Zowe member list did not verify the requested exact member.'), { code: 'RFJ_RESOURCE_INVALID' });
+        }
+      }
+    } else if (operation.kind === 'datasetList') {
       if (returnedNames.some((name) => name === undefined || !datasetMatchesScope(name, operation.scope))) throw Object.assign(new Error('Zowe data set list contained a resource outside the authorized scope.'), { code: 'RFJ_RESOURCE_INVALID' });
     } else {
     // An empty, successful exact-name query is the only proof of absence. Any

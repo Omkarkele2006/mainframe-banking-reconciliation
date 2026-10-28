@@ -49,6 +49,7 @@ export type ZoweWorkbenchAdapter = ReconciliationRemote & {
   listDatasets(scope: string): Promise<Array<Record<string, unknown>>>;
   datasetAttributes(dataset: string): Promise<Record<string, unknown>>;
   downloadDataset(dataset: string, localPath: string): Promise<void>;
+  verifyLoadModule(library: string, member: string): Promise<{ verified: boolean; evidence?: string; message?: string }>;
 };
 export function createZoweReconciliationAdapter(dependencies: ZoweOperationDependencies = {}): ZoweWorkbenchAdapter {
   return {
@@ -64,6 +65,17 @@ export function createZoweReconciliationAdapter(dependencies: ZoweOperationDepen
     },
     async datasetAttributes(dataset) {
       return await this.attributes(dataset) as unknown as Record<string, unknown>;
+    },
+    async verifyLoadModule(library, member) {
+      if (library.trim().toUpperCase() !== 'Z73968.LOAD' || member.trim().toUpperCase() !== 'RECONCIL') throw Object.assign(new Error('Only the configured Z73968.LOAD(RECONCIL) member check is supported.'), { code: 'LOAD_MODULE_QUERY_INVALID' });
+      const result = await invokeZoweOperation({ kind: 'datasetMemberList', dataset: library, member }, dependencies);
+      if (result.envelope.success !== true || result.envelope.exitCode !== 0) throw Object.assign(new Error('The load-module query did not confirm a successful Zowe CLI operation.'), { code: 'DATASET_RESPONSE_INVALID' });
+      const data = object(result.data); const response = object(data?.apiResponse); const items = response?.items;
+      if (data?.success !== true || !Array.isArray(items)) throw Object.assign(new Error('The load-module member query did not return a validated response.'), { code: 'DATASET_RESPONSE_INVALID' });
+      if (items.length > 1 || (response?.returnedRows !== undefined && response.returnedRows !== items.length)) throw Object.assign(new Error('The load-module member query returned an ambiguous response.'), { code: 'DATASET_RESPONSE_INVALID' });
+      const found = items.length === 1 && typeof object(items[0])?.member === 'string' && (object(items[0])!.member as string).toUpperCase() === member.toUpperCase();
+      if (!found) return { verified: false, message: `The configured load member ${member.toUpperCase()} was not returned by the exact member query.` };
+      return { verified: true, evidence: `Exact member ${library.toUpperCase()}(${member.toUpperCase()}) returned by Zowe CLI all-members query.` };
     },
     async attributes(dataset) {
       const result = await invokeZoweOperation({ kind: 'datasetAttributes', dataset }, dependencies);

@@ -74,3 +74,10 @@ test('expired application session is rejected on the next protected request', ()
     clearSessionsForTests();
   }
 });
+
+test('non-ASCII CSRF token is rejected without throwing or reaching the protected action',()=>{
+ clearSessionsForTests();const session=createOperatorSession('operator',{username:'operator',passwordHash:`scrypt$${'a'.repeat(32)}$${'b'.repeat(128)}`,ttlSeconds:1800});
+ const req={headers:{cookie:`ledgerline_session=${session.token}`},method:'POST',get:()=>String.fromCharCode(233).repeat(64)} as unknown as AuthRequest;
+ let status=0;const res={locals:{},status(code:number){status=code;return this;},json(){return this;}} as unknown as Response;
+ sessionMiddleware(req,res,(()=>undefined) as NextFunction);assert.doesNotThrow(()=>requireOperator(req,res,(()=>assert.fail('invalid CSRF must not proceed')) as NextFunction));assert.equal(status,403);clearSessionsForTests();
+});

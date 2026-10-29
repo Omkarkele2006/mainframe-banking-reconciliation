@@ -123,6 +123,18 @@ test('keeps IDCAMS VSAM creation and load controls inside their SYSIN data block
 
   assert.equal(blocks.length, 2, 'both IDCAMS steps must have terminated in-stream SYSIN data');
   assert.match(blocks[0]!, /DEFINE CLUSTER \( -[\s\S]*NAME\(Z73968\.R1A2B3C4\.SETTLE\)[\s\S]*INDEXED KEYS\(10 0\) RECORDSIZE\(38 38\) TRACKS\(\d+ \d+\)[\s\S]*DATA \(NAME\(Z73968\.R1A2B3C4\.SETDATA\)\)[\s\S]*INDEX \(NAME\(Z73968\.R1A2B3C4\.SETIDX\)\)/);
+  const expectedDefine = [
+    '  DEFINE CLUSTER ( -',
+    `    NAME(${current.datasets.SETTLE}) -`,
+    `    INDEXED KEYS(10 0) RECORDSIZE(38 38) TRACKS(${current.allocation.settlementVsamPrimaryTracks} ${current.allocation.settlementVsamSecondaryTracks})) -`,
+    `    DATA (NAME(${current.datasets.SETTLE_DATA})) -`,
+    `    INDEX (NAME(${current.datasets.SETTLE_INDEX}))`,
+  ].join('\n');
+  assert.equal(blocks[0], expectedDefine);
+  let depth=0;
+  for(const character of blocks[0]!){if(character==='(')depth++;if(character===')')depth--;assert.ok(depth>=0);}
+  assert.equal(depth,0);
+  assert.ok(jcl.includes(`${expectedDefine}\n/*\n//IFCRT`));
   assert.match(blocks[1]!, /REPRO INFILE\(INPUT\) OUTDATASET\(Z73968\.R1A2B3C4\.SETTLE\)/);
   assert.doesNotMatch(blocks[1]!, /\bREPLACE\b/i, 'run-specific loading must not replace an existing/shared cluster');
 
@@ -250,4 +262,10 @@ test('generated plan JCL and cleanup candidates remain run-scoped and contain no
   assert.ok(previewResult.cleanupManifest.temporaryDatasetCandidates.every((dsn) => runDatasets.has(dsn)));
   assert.ok(previewResult.cleanupManifest.retainedDatasetCandidates.every((dsn) => runDatasets.has(dsn)));
   assert.equal(previewResult.cleanupManifest.automaticCleanupEnabled, false);
+});
+
+test('ambiguous COBOL summaries and business discrepancies never pass clean publication gates',()=>{
+ const counts={transactionCount:10000,settlementCount:10000,matchedCount:9990,mismatchedCount:10,transactionOnlyCount:0,settlementOnlyCount:0};
+ assert.equal(eodPublicationAllowed(0,counts,{matchedCount:9990,mismatchedCount:10,transactionOnlyCount:0,settlementOnlyCount:0},0),false);
+ assert.throws(()=>parseCobolCounts('TRANSACTION INPUT COUNT: 10000\nTRANSACTION INPUT COUNT: 9999'),/Ambiguous duplicate/);
 });

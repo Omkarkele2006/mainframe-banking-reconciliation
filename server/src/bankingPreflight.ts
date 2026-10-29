@@ -20,7 +20,7 @@ export type BankingPreflight = {
 };
 export type PreflightRemote = {
   attributes(dataset:string):Promise<DatasetAttributes>;
-  verifyLoadModule?(library:string,member:string):Promise<{verified:boolean;evidence?:string;message?:string}>;
+  verifyLoadModule?(library:string,member:string):Promise<{verified:boolean;evidence?:string;message?:string;diagnostic?:Record<string,unknown>}>;
   create(dataset:string,primaryTracks:number,secondaryTracks:number):Promise<unknown>;
   upload(dataset:string,localPath:string):Promise<void>;
   download(dataset:string,localPath:string):Promise<void>;
@@ -175,8 +175,17 @@ const RECONCILIATION_STEP_NAMES = ['VSAMCRT','VSAMLOAD','RECONCIL'] as const;
 const OUTPUT_LAYOUTS = { MATCHOUT:38, MISMOUT:120, TXNMISS:120, SETMISS:120 } as const;
 const TERMINAL_JES = new Set(['ABEND','CANCELED','CANCELLED','JCL ERROR']);
 
+export function canRetryDefineClusterFailure(op:Pick<BankingPreflight,'state'|'stage'|'errorCategory'|'datasets'|'stageResults'>):boolean {
+  if(!((op.state==='RECONCILIATION_FAILED')||(op.state==='RECONCILIATION_PREFLIGHT'&&op.stage==='LOAD_MODULE_RETRY_REQUESTED'))||op.errorCategory!=='RECONCILIATION_STEP_FAILED')return false;
+  const evidence=objectValue(op.stageResults.reconciliation),job=objectValue(evidence?.job);
+  const spool=typeof evidence?.spoolText==='string'?evidence.spoolText:'';
+  const targets=op.datasets.filter(item=>RECONCILIATION_DATASET_ROLES.includes(item.role as typeof RECONCILIATION_DATASET_ROLES[number]));
+  return evidence?.outcome==='FAILED'&&typeof job?.jobId==='string'&&JOB_ID.test(job.jobId)&&job.status==='OUTPUT'&&job.returnCode===12&&/IDC3211I[\s\S]*?KEYWORD 'DATA' IS IMPROPER/.test(spool)&&/IEF142I\s+\S+\s+VSAMCRT\s+-[^\n]*COND CODE\s+0012/.test(spool)&&targets.length===7&&new Set(targets.map(item=>item.role)).size===7&&targets.every(item=>item.state==='UNCERTAIN');
+}
+
 const RETRYABLE_LOAD_MODULE_ERRORS=new Set(['LOAD_MODULE_UNVERIFIED','DATASET_RESPONSE_INVALID','RFJ_RESOURCE_INVALID','AUTHENTICATION','AUTHORIZATION','NETWORK','TLS','TIMEOUT','ZOWE_TIMEOUT','CLI_UNAVAILABLE']);
 export function canResumeLoadModuleVerification(op:Pick<BankingPreflight,'state'|'stage'|'errorCategory'|'datasets'|'stageResults'>):boolean {
+  if(canRetryDefineClusterFailure(op))return true;
   if(!['RECONCILIATION_BLOCKED','RECONCILIATION_PREFLIGHT'].includes(op.state)||!['LOAD_MODULE_VERIFICATION','LOAD_MODULE_RETRY_REQUESTED'].includes(op.stage)||!op.errorCategory||!RETRYABLE_LOAD_MODULE_ERRORS.has(op.errorCategory))return false;
   const evidence=objectValue(op.stageResults.reconciliation);const failure=objectValue(evidence?.failure);const job=objectValue(evidence?.job);
   if(failure?.stage!=='LOAD_MODULE_VERIFICATION'||failure.category!==op.errorCategory||job?.jobId!==undefined||evidence?.submittedAt!==undefined)return false;
@@ -185,7 +194,7 @@ export function canResumeLoadModuleVerification(op:Pick<BankingPreflight,'state'
 }
 export function reconciliationContinuationDisposition(state:PreflightState,safeLoadModuleResume=false):'CONTINUE'|'REPLAY'|'NOT_READY' {
   if(state==='READY_FOR_RECONCILIATION')return 'CONTINUE';
-  if(state==='RECONCILIATION_BLOCKED'&&safeLoadModuleResume)return 'CONTINUE';
+  if(['RECONCILIATION_BLOCKED','RECONCILIATION_FAILED'].includes(state)&&safeLoadModuleResume)return 'CONTINUE';
   if(['RECONCILIATION_PREFLIGHT','VSAM_COBOL_RUNNING','RECONCILIATION_BLOCKED','RECONCILIATION_FAILED','RECONCILIATION_UNRESOLVED','RECONCILIATION_COMPLETED','RECONCILIATION_COMPLETED_WITH_EXCEPTIONS'].includes(state))return 'REPLAY';
   return 'NOT_READY';
 }
@@ -205,7 +214,7 @@ function parseReconciliationStepCodes(spool:string):Record<string,number> {
   return result;
 }
 function assertSavedPreflight(op:BankingPreflight,claimedByThisRequest:boolean,safeLoadModuleResume:boolean):{transactionCount:number;settlementCount:number} {
-  const readyState=op.state==='READY_FOR_RECONCILIATION'||(claimedByThisRequest&&op.state==='RECONCILIATION_PREFLIGHT'&&['RECONCILIATION_REQUESTED','LOAD_MODULE_RETRY_REQUESTED'].includes(op.stage))||(safeLoadModuleResume&&op.state==='RECONCILIATION_BLOCKED'&&op.stage==='LOAD_MODULE_VERIFICATION');
+  const readyState=op.state==='READY_FOR_RECONCILIATION'||(claimedByThisRequest&&op.state==='RECONCILIATION_PREFLIGHT'&&['RECONCILIATION_REQUESTED','LOAD_MODULE_RETRY_REQUESTED'].includes(op.stage))||(safeLoadModuleResume&&((op.state==='RECONCILIATION_BLOCKED'&&op.stage==='LOAD_MODULE_VERIFICATION')||canRetryDefineClusterFailure(op)));
   if(!readyState||!op.jobId||op.jobStatus!=='OUTPUT'||op.returnCode!==0||!op.spoolText)fail('The saved preflight must be READY, have a confirmed JES OUTPUT/RC 0 result, and retain its actual spool.','PREFLIGHT_EVIDENCE_INVALID');
   assertSuccessfulJesJob({jobId:op.jobId,status:op.jobStatus,returnCode:op.returnCode},'Input preflight');
   if(assertPreflightStepCodes(op.returnCode,parsePreflightStepCodes(op.spoolText))!=='CLEAN')fail('The saved preflight did not prove a clean duplicate-key check.','PREFLIGHT_EVIDENCE_INVALID');
@@ -217,7 +226,7 @@ function assertSavedPreflight(op:BankingPreflight,claimedByThisRequest:boolean,s
   return {transactionCount,settlementCount};
 }
 function verifyVsAmAttributes(dataset:string,value:DatasetAttributes):void {
-  if(value.dsname.toUpperCase()!==dataset.toUpperCase()||value.dsorg?.toUpperCase()!=='VS'||Number(value.lrecl)!==38)fail('The run-specific settlement KSDS did not verify by exact name as a VSAM resource with 38-byte records.','DATASET_ATTRIBUTES_MISMATCH');
+  if(value.dsname.toUpperCase()!==dataset.toUpperCase()||value.dsorg?.toUpperCase()!=='VS')fail('The run-specific settlement KSDS did not verify by exact name as a VSAM resource with 38-byte records.','DATASET_ATTRIBUTES_MISMATCH');
 }
 function ensureReconciliationGates(env:NodeJS.ProcessEnv,plan:RunExecutionPlan):void {
   const httpsEndpoint=(()=>{try{return new URL(env.MAINFRAME_ENDPOINT??'').protocol==='https:';}catch{return false;}})();
@@ -233,6 +242,7 @@ function assertRunScopedReconciliationJcl(op:BankingPreflight,jcl:string):void {
 /** Continues the exact persisted preflight run. This stage never creates a new run ID
  * or re-uploads/re-submits the sort preflight; all created remote resources are retained. */
 export async function executeBankingReconciliationStage(op:BankingPreflight,deps:PreflightDependencies):Promise<BankingPreflight> {
+  const defineRetry=canRetryDefineClusterFailure(op);
   const safeLoadModuleResume=canResumeLoadModuleVerification(op);
   if(TERMINAL.has(op.state)&&op.state!=='READY_FOR_RECONCILIATION'&&!safeLoadModuleResume)return op;
   const claimedByThisRequest=op.state==='RECONCILIATION_PREFLIGHT'&&['RECONCILIATION_REQUESTED','LOAD_MODULE_RETRY_REQUESTED'].includes(op.stage);
@@ -248,6 +258,12 @@ export async function executeBankingReconciliationStage(op:BankingPreflight,deps
     // continuation state. The API atomically claims a ready run by changing it
     // to RECONCILIATION_PREFLIGHT / RECONCILIATION_REQUESTED.
     const expected=assertSavedPreflight(op,claimedByThisRequest,safeLoadModuleResume);
+    if(defineRetry){
+      const attempts=Array.isArray(op.stageResults.reconciliationAttempts)?op.stageResults.reconciliationAttempts:[];
+      op.stageResults.reconciliationAttempts=[...attempts,{evidence:structuredClone(priorEvidence),jcl:op.reconciliationJcl,archivedAt:(deps.now??(()=>new Date()))()}];
+      stageData.retryOfJobId=objectValue(priorEvidence?.job)?.jobId;
+    }
+    op.errorCategory=undefined;op.errorMessage=undefined;
     op.state='RECONCILIATION_PREFLIGHT';op.stage='RECONCILIATION_CONFIGURATION';stageRecord();await save(deps,op);
     const readiness=await deps.readiness();if(readiness.state!=='DATASET_ACCESS_VERIFIED')fail(readiness.message||'The read-only Zowe connection and dataset-access check failed.','ZOWE_NOT_READY');
 
@@ -262,9 +278,10 @@ export async function executeBankingReconciliationStage(op:BankingPreflight,deps
     if(verifiedInputs.TXNSORT.length!==expected.transactionCount||verifiedInputs.SETSORT.length!==expected.settlementCount||verifiedInputs.DUPES.length!==0)fail('Run-scoped sorted inputs or duplicate output no longer match the saved clean preflight evidence.','PREFLIGHT_EVIDENCE_INVALID');
 
     op.stage='LOAD_MODULE_VERIFICATION';await save(deps,op);
+    stageData.loadModule={library:op.plan.config.loadLibrary,member:op.plan.config.loadModule,adapterAvailable:typeof deps.remote.verifyLoadModule==='function'};await save(deps,op);
     if(!deps.remote.verifyLoadModule)fail('The installed Zowe adapter has no approved read-only load-member check.','LOAD_MODULE_UNVERIFIED');
     const moduleResult=await deps.remote.verifyLoadModule(op.plan.config.loadLibrary,op.plan.config.loadModule);
-    stageData.loadModule={library:op.plan.config.loadLibrary,member:op.plan.config.loadModule,verified:moduleResult.verified===true,...(moduleResult.evidence?{evidence:sanitizeText(moduleResult.evidence,180)}:{}),...(moduleResult.message?{message:sanitizeText(moduleResult.message,180)}:{})};
+    stageData.loadModule={library:op.plan.config.loadLibrary,member:op.plan.config.loadModule,verified:moduleResult.verified===true,diagnostic:moduleResult.diagnostic,...(moduleResult.evidence?{evidence:sanitizeText(moduleResult.evidence,180)}:{}),...(moduleResult.message?{message:sanitizeText(moduleResult.message,180)}:{})};
     await save(deps,op);
     if(!moduleResult.verified)fail(moduleResult.message??`The configured load member ${op.plan.config.loadModule} was not present in ${op.plan.config.loadLibrary}.`,'LOAD_MODULE_UNVERIFIED');
 
@@ -276,7 +293,9 @@ export async function executeBankingReconciliationStage(op:BankingPreflight,deps
       try{const found=await deps.remote.attributes(item.name);if(found.dsname.toUpperCase()!==item.name.toUpperCase())fail('An exact-name collision query returned a different resource.','DATASET_RESPONSE_INVALID');fail(`Run output ${item.name} already exists; no existing resource will be overwritten.`,'DATASET_COLLISION');}
       catch(error){if(errorCode(error)!=='DATASET_NOT_FOUND')throw error;}
     }
-    for(const item of targets)await deps.ownership(op,item,'PLANNED');
+    stageData.targetAbsenceVerified=targets.map(item=>({dataset:item.name,absent:true}));
+    for(const item of targets){item.state='PLANNED';item.errorCategory=undefined;await deps.ownership(op,item,'PLANNED');}
+    await save(deps,op);
     for(const item of targets){item.state='CREATING';await deps.ownership(op,item,'CREATING');}
     stageData.datasets=targets.map((item)=>({role:item.role,dataset:item.name,state:'CREATING'}));
     op.state='VSAM_COBOL_RUNNING';op.stage='VSAM_COBOL_JCL_SUBMISSION';stageRecord();await save(deps,op);
@@ -320,6 +339,7 @@ export async function executeBankingReconciliationStage(op:BankingPreflight,deps
     stageData.summary=counts;stageData.physicalOutputCounts=outputCounts;stageData.outputs=outputEvidence;stageData.outcome=hasExceptions?'COMPLETED_WITH_EXCEPTIONS':'COMPLETED';stageData.financialTotals='Not available in the deployed COBOL output.';
     op.state=hasExceptions?'RECONCILIATION_COMPLETED_WITH_EXCEPTIONS':'RECONCILIATION_COMPLETED';op.stage='VSAM_COBOL_EVIDENCE_VERIFIED';op.completedAt=(deps.now??(()=>new Date()))();stageRecord();
   }catch(error){
+    if(op.stage==='LOAD_MODULE_VERIFICATION'&&(error as {loadModuleDiagnostic?:unknown}).loadModuleDiagnostic)stageData.loadModule={...objectValue(stageData.loadModule),diagnostic:(error as {loadModuleDiagnostic:unknown}).loadModuleDiagnostic};
     const uncertainSubmission=submissionInvoked&&op.stage==='VSAM_COBOL_JCL_SUBMISSION'&&!objectValue(stageData.job)?.jobId;
     const failure=uncertainSubmission?safeFailure(Object.assign(new Error(''),{code:'RECONCILIATION_SUBMISSION_UNCERTAIN'})):safeFailure(error);op.errorCategory=failure.code;op.errorMessage=failure.message;
     stageData.failure={stage:op.stage,category:failure.code,message:failure.message};stageRecord();
@@ -349,4 +369,37 @@ export function publicBankingPreflight(op:BankingPreflight,includeSpool=true){
     ...(typeof reconciliationJob?.jobId==='string'?{reconciliationJobId:reconciliationJob.jobId}:{}),...(typeof reconciliationJob?.status==='string'?{reconciliationJobStatus:reconciliationJob.status}:{}),...(typeof reconciliationJob?.returnCode==='number'?{reconciliationReturnCode:reconciliationJob.returnCode}:{}),
     submittedAt:op.submittedAt,lastCheckedAt:op.lastCheckedAt,completedAt:op.completedAt,errorCategory:op.errorCategory,errorMessage:op.errorMessage,canResumeReconciliation:canResumeLoadModuleVerification(op),...(includeSpool&&op.spoolText?{spoolText:op.spoolText}:{})
   };
+}
+
+/** Read-only recovery: deliberately has no submission, allocation, upload or deletion calls. */
+export async function recoverBankingOutputVerification(op:BankingPreflight,deps:PreflightDependencies):Promise<BankingPreflight>{
+  const stageData=structuredClone(objectValue(op.stageResults.reconciliation)??{});
+  const job=objectValue(stageData.job),failure=objectValue(stageData.failure);
+  if(op.state!=='RECONCILIATION_FAILED'||failure?.stage!=='VSAM_AND_OUTPUT_DATASET_VERIFICATION'||job?.status!=='OUTPUT'||job.returnCode!==0||typeof job.jobId!=='string'||!JOB_ID.test(job.jobId)||typeof stageData.spoolText!=='string')fail('A confirmed successful existing job and post-job verification failure are required.','VERIFICATION_RECOVERY_BLOCKED');
+  const spool=stageData.spoolText;const codes=parseReconciliationStepCodes(spool);
+  if(Object.values(codes).some(code=>code!==0))fail('All existing JES steps must be RC 0.','VERIFICATION_RECOVERY_BLOCKED');
+  const ready={...op,state:'READY_FOR_RECONCILIATION' as const};const expected=assertSavedPreflight(ready,false,false);
+  const targets=op.datasets.filter(item=>RECONCILIATION_DATASET_ROLES.includes(item.role as typeof RECONCILIATION_DATASET_ROLES[number]));
+  if(targets.length!==7||new Set(targets.map(item=>item.role)).size!==7||targets.some(item=>item.name!==op.plan.datasets[item.role as keyof typeof op.plan.datasets]))fail('Run manifest does not match the saved plan.','DATASET_SCOPE_INVALID');
+  const downloads:string[]=[];const status={returnCode:0};
+  stageData.previousVerificationFailure=stageData.failure;delete stageData.failure;
+  try{
+    for(const role of ['SETTLE_DATA','SETTLE_INDEX'] as const){const name=op.plan.datasets[role];const value=await deps.remote.attributes(name);if(value.dsname.toUpperCase()!==name.toUpperCase())fail('Component identity mismatch.','DATASET_ATTRIBUTES_MISMATCH');}
+    const vsam=targets.find((item)=>item.role==='SETTLE')!;const vsamAttributes=await deps.remote.attributes(vsam.name);verifyVsAmAttributes(vsam.name,vsamAttributes);vsam.attributes=vsamAttributes;vsam.state='CREATED';await deps.ownership(op,vsam,'CREATED');
+    for(const role of ['SETTLE_DATA','SETTLE_INDEX'] as const){const component=targets.find((item)=>item.role===role)!;component.state='CREATED';component.attributes={componentOf:vsam.name,component:role==='SETTLE_DATA'?'DATA':'INDEX'};await deps.ownership(op,component,'CREATED');}
+    const outputCounts:Record<'MATCHOUT'|'MISMOUT'|'TXNMISS'|'SETMISS',number>={MATCHOUT:0,MISMOUT:0,TXNMISS:0,SETMISS:0};const outputEvidence:Record<string,unknown>={};
+    for(const [role,recordLength] of Object.entries(OUTPUT_LAYOUTS) as Array<[keyof typeof OUTPUT_LAYOUTS,38|120]>){
+      const item=targets.find((dataset)=>dataset.role===role)!;const attributes=await deps.remote.attributes(item.name);if(attributes.dsname.toUpperCase()!==item.name.toUpperCase()||attributes.dsorg?.toUpperCase()!=='PS'||attributes.recfm?.toUpperCase()!=='FB'||Number(attributes.lrecl)!==recordLength)fail(`${role} did not verify as the expected run-specific PS/FB/${recordLength} dataset.`,'DATASET_ATTRIBUTES_MISMATCH');
+      const local=path.join(path.resolve(deps.stagingRoot),`${crypto.randomUUID()}.out`);downloads.push(local);await deps.remote.download(item.name,local);const bytes=await fs.readFile(local);const recordCount=countDownloadedRecords(bytes,recordLength);item.attributes=attributes;item.recordCount=recordCount;item.state='CREATED';await deps.ownership(op,item,'CREATED');outputCounts[role]=recordCount;outputEvidence[role]={dataset:item.name,recordCount,recordLength,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),verified:true};
+    }
+    const counts:CobolCounts=parseCobolCounts(spool);const consistency=countConsistencyError(counts);
+    if(consistency||counts.transactionCount!==expected.transactionCount||counts.settlementCount!==expected.settlementCount||counts.matchedCount!==outputCounts.MATCHOUT||counts.mismatchedCount!==outputCounts.MISMOUT||counts.transactionOnlyCount!==outputCounts.TXNMISS||counts.settlementOnlyCount!==outputCounts.SETMISS)fail(consistency??'Six COBOL summary counts did not agree with sorted inputs and verified physical output counts.','RECONCILIATION_OUTPUT_INVALID');
+    const hasExceptions=counts.mismatchedCount+counts.transactionOnlyCount+counts.settlementOnlyCount>0;
+    if((status.returnCode===0&&hasExceptions)||(status.returnCode===4&&!hasExceptions))fail('The COBOL return code did not agree with its verified discrepancy counts.','RECONCILIATION_OUTPUT_INVALID');
+    stageData.summary=counts;stageData.physicalOutputCounts=outputCounts;stageData.outputs=outputEvidence;stageData.outcome=hasExceptions?'COMPLETED_WITH_EXCEPTIONS':'COMPLETED';stageData.financialTotals='Not available in the deployed COBOL output.';
+    op.state=hasExceptions?'RECONCILIATION_COMPLETED_WITH_EXCEPTIONS':'RECONCILIATION_COMPLETED';op.stage='VSAM_COBOL_EVIDENCE_VERIFIED';op.completedAt=(deps.now??(()=>new Date()))();op.stageResults.reconciliation=stageData;
+    op.errorCategory=undefined;op.errorMessage=undefined;
+  }catch(error){const failure=safeFailure(error);op.errorCategory=failure.code;op.errorMessage=failure.message;op.state='RECONCILIATION_FAILED';stageData.failure={stage:'VSAM_AND_OUTPUT_DATASET_VERIFICATION',category:failure.code,message:failure.message};op.stageResults.reconciliation=stageData;
+  }finally{for(const file of downloads)await fs.unlink(file).catch(()=>undefined);await save(deps,op);}
+  return op;
 }

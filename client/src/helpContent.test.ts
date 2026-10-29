@@ -13,7 +13,8 @@ test('Help Center covers the current application sections and security boundary'
   assert.match(upload, /submits only the server-generated .* JCL/);
   assert.match(upload, /uploads and reads them back/);
   assert.match(upload, /same run/);
-  assert.match(upload, /EOD, final publication and cleanup remain outside this stage/);
+  assert.match(upload, /EOD Settlement and report verification are available for the same run through Reports & History/);
+  assert.match(upload, /Final publication and automated cleanup remain out of scope/);
   assert.match(upload, /ordinary reconciliation API remains NOT_CONFIGURED/);
   assert.match(helpSections.find(section => section.id === 'audit-logs')?.body ?? '', /requires the server-configured application operator session/);
   assert.equal(helpDestinations['upload-run'], 'upload');

@@ -1,10 +1,11 @@
+import {makeTenKDemoInputs} from './demoFixtures.js';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { assertPreflightStepCodes, canResumeLoadModuleVerification, executeBankingPreflight, executeBankingReconciliationStage, parsePreflightStepCodes, prepareBankingPreflight, publicBankingPreflight, reconciliationContinuationDisposition, type PreflightDependencies, type PreflightInput, type PreflightRemote } from './bankingPreflight.js';
+import { recoverBankingOutputVerification, canRetryDefineClusterFailure, assertPreflightStepCodes, canResumeLoadModuleVerification, executeBankingPreflight, executeBankingReconciliationStage, parsePreflightStepCodes, prepareBankingPreflight, publicBankingPreflight, reconciliationContinuationDisposition, type PreflightDependencies, type PreflightInput, type PreflightRemote } from './bankingPreflight.js';
 import { validateDatasetUpload } from './datasetLifecycle.js';
 import type { CobolCounts } from './executionPlan.js';
 import type { DatasetAttributes } from './uploadVerification.js';
@@ -14,21 +15,21 @@ const org={actorId:'operator@example.test',idempotencyKey:'preflight-key-0000000
 const row=(id:string,account='ACCOUNT001',amount='000001250')=>`${id.padEnd(10,'0')}${account}${amount}20261026A`;
 function spool(ddup=0){return `IEF142I LS123456 TXNSORT - STEP WAS EXECUTED - COND CODE 0000\nIEF142I LS123456 SETSORT - STEP WAS EXECUTED - COND CODE 0000\nIEF142I LS123456 DUPSEL - STEP WAS EXECUTED - COND CODE 0000\nIEF142I LS123456 DUPCNT - STEP WAS EXECUTED - COND CODE ${String(ddup).padStart(4,'0')}`;}
 async function staged(root:string,name:string,records:string[]):Promise<PreflightInput>{const uploadId=crypto.randomUUID();const bytes=Buffer.from(`${records.join('\r\n')}\r\n`,'ascii');const stagedPath=path.join(root,`${uploadId}.txt`);await fs.writeFile(stagedPath,bytes,{flag:'wx'});return {uploadId,originalName:name,size:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),recordCount:validateDatasetUpload(bytes).recordCount,valid:true,stagedPath};}
-async function fixture(options:{settlement?:string[];collision?:boolean;submitFailure?:boolean;pendingJob?:boolean;statusRc?:number;duplicateOutput?:string[];uploadFailure?:boolean;readbackMismatch?:boolean;failedStep?:boolean;reconciliationCollision?:boolean;moduleVerified?:boolean;reconciliationSubmitFailure?:boolean;reconciliationPending?:boolean;reconciliationRc?:number}={}){
-  const stagingRoot=await fs.mkdtemp(path.join(os.tmpdir(),'ledgerline-preflight-'));const txn=await staged(stagingRoot,'txn.txt',[row('TXN0000002'),row('TXN0000001'),row('TXN0000001','ACCOUNT002')]);const settlement=await staged(stagingRoot,'settle.txt',options.settlement??[row('SET0000002'),row('SET0000001')]);
-  const op=prepareBankingPreflight({...org,transaction:txn,settlement},env);const datasets=new Map<string,{attributes:DatasetAttributes;records:string[]}>();let createCalls=0;let uploadCalls=0;let submitCalls=0;let reconciliationSubmitted=false;const deleteCalls=0;
+async function fixture(options:{tenK?:'positive'|'negative';settlement?:string[];collision?:boolean;submitFailure?:boolean;pendingJob?:boolean;statusRc?:number;duplicateOutput?:string[];uploadFailure?:boolean;readbackMismatch?:boolean;failedStep?:boolean;reconciliationCollision?:boolean;moduleVerified?:boolean;reconciliationSubmitFailure?:boolean;reconciliationPending?:boolean;reconciliationRc?:number}={}){
+  const stagingRoot=await fs.mkdtemp(path.join(os.tmpdir(),'ledgerline-preflight-'));const txn=await staged(stagingRoot,'txn.txt',options.tenK?validateDatasetUpload(makeTenKDemoInputs(options.tenK==='negative').transaction).records:[row('TXN0000002'),row('TXN0000001'),row('TXN0000001','ACCOUNT002')]);const settlement=await staged(stagingRoot,'settle.txt',options.settlement??(options.tenK?validateDatasetUpload(makeTenKDemoInputs(options.tenK==='negative').settlement).records:[row('SET0000002'),row('SET0000001')]));
+  const op=prepareBankingPreflight({...org,transaction:txn,settlement},env);const datasets=new Map<string,{attributes:DatasetAttributes;records:string[]}>();let createCalls=0;let uploadCalls=0;let submitCalls=0;let moduleChecks=0;let reconciliationSubmitted=false;const deleteCalls=0;
   const remote:PreflightRemote={
     async attributes(dataset){const value=datasets.get(dataset);if(!value){if((options.collision&&dataset===op.plan.datasets.TXNIN)||(options.reconciliationCollision&&dataset===op.plan.datasets.MATCHOUT))return {dsname:dataset,dsorg:'PS',recfm:'FB',lrecl:38};throw Object.assign(new Error('absent'),{code:'DATASET_NOT_FOUND'});}return value.attributes;},
     async create(dataset){createCalls++;datasets.set(dataset,{attributes:{dsname:dataset,dsorg:'PS',recfm:'FB',lrecl:38},records:[]});return {primaryTracks:1,secondaryTracks:1,unit:'TRK'};},
     async upload(dataset,file){uploadCalls++;if(options.uploadFailure)throw Object.assign(new Error('mock transfer failure'),{code:'REMOTE_HTTP_ERROR'});const records=validateDatasetUpload(await fs.readFile(file)).records;datasets.get(dataset)!.records=records;},
     async download(dataset,file){const records=datasets.get(dataset)?.records;if(!records)throw Object.assign(new Error('absent'),{code:'DATASET_NOT_FOUND'});const changed=[...records];if(options.readbackMismatch&&dataset===op.plan.datasets.TXNIN)changed[0]=`${changed[0]!.slice(0,20)}999999999${changed[0]!.slice(29)}`;await fs.writeFile(file,Buffer.from(changed.length?`${changed.join('\r\n')}\r\n`:'','ascii'));},
-    async verifyLoadModule(library,member){return options.moduleVerified===false?{verified:false,message:`${library}(${member}) is absent.`}:{verified:true,evidence:`${library}(${member}) exact member result`};},
-    async submitJcl(localPath){submitCalls++;const jcl=await fs.readFile(localPath,'utf8');if(jcl.includes('//VSAMCRT')){reconciliationSubmitted=true;if(options.reconciliationSubmitFailure)throw Object.assign(new Error('uncertain'),{code:'TIMEOUT'});if(op.plan.datasets.SETTLE)datasets.set(op.plan.datasets.SETTLE,{attributes:{dsname:op.plan.datasets.SETTLE,dsorg:'VS',lrecl:38},records:[]});for(const role of ['SETTLE_DATA','SETTLE_INDEX'] as const){const d=op.plan.datasets[role];datasets.set(d,{attributes:{dsname:d,dsorg:'VS'},records:[]});}for(const [role,length,records] of [['MATCHOUT',38,[]],['MISMOUT',120,[]],['TXNMISS',120,['T'.repeat(120),'T'.repeat(120)]],['SETMISS',120,['S'.repeat(120),'S'.repeat(120)]]] as const){const d=op.plan.datasets[role];datasets.set(d,{attributes:{dsname:d,dsorg:'PS',recfm:'FB',lrecl:length},records:[...records]});}return {jobId:'JOB01997'};}if(options.submitFailure)throw Object.assign(new Error('timed out'),{code:'TIMEOUT'});for(const [key,records] of [['TXNSORT',[...new Map([...(datasets.get(op.plan.datasets.TXNIN)?.records??[])].sort().map(x=>[x.slice(0,10),x])).values()]],['SETSORT',[...(datasets.get(op.plan.datasets.SETIN)?.records??[])].sort()],['DUPES',options.duplicateOutput??[]]] as const){const d=op.plan.datasets[key];datasets.set(d,{attributes:{dsname:d,dsorg:'PS',recfm:'FB',lrecl:38},records:[...records]});}return {jobId:'JOB01996'};},
+    async verifyLoadModule(library,member){moduleChecks++;return options.moduleVerified===false?{verified:false,message:`${library}(${member}) is absent.`}:{verified:true,evidence:`${library}(${member}) exact member result`};},
+    async submitJcl(localPath){submitCalls++;const jcl=await fs.readFile(localPath,'utf8');if(jcl.includes('//VSAMCRT')){reconciliationSubmitted=true;if(options.reconciliationSubmitFailure)throw Object.assign(new Error('uncertain'),{code:'TIMEOUT'});if(op.plan.datasets.SETTLE)datasets.set(op.plan.datasets.SETTLE,{attributes:{dsname:op.plan.datasets.SETTLE,dsorg:'VS',lrecl:38},records:[]});for(const role of ['SETTLE_DATA','SETTLE_INDEX'] as const){const d=op.plan.datasets[role];datasets.set(d,{attributes:{dsname:d,dsorg:'VS'},records:[]});}for(const [role,length,records] of [['MATCHOUT',38,[]],['MISMOUT',120,[]],['TXNMISS',120,['T'.repeat(120),'T'.repeat(120)]],['SETMISS',120,['S'.repeat(120),'S'.repeat(120)]]] as const){const d=op.plan.datasets[role];datasets.set(d,{attributes:{dsname:d,dsorg:'PS',recfm:'FB',lrecl:length},records:options.tenK?(role==='MATCHOUT'?validateDatasetUpload(makeTenKDemoInputs(false).transaction).records.slice(options.tenK==='negative'?10:0):role==='MISMOUT'&&options.tenK==='negative'?Array.from({length:10},()=> 'M'.repeat(120)):[]):[...records]});}return {jobId:'JOB01997'};}if(options.submitFailure)throw Object.assign(new Error('timed out'),{code:'TIMEOUT'});for(const [key,records] of [['TXNSORT',[...new Map([...(datasets.get(op.plan.datasets.TXNIN)?.records??[])].sort().map(x=>[x.slice(0,10),x])).values()]],['SETSORT',[...(datasets.get(op.plan.datasets.SETIN)?.records??[])].sort()],['DUPES',options.duplicateOutput??[]]] as const){const d=op.plan.datasets[key];datasets.set(d,{attributes:{dsname:d,dsorg:'PS',recfm:'FB',lrecl:38},records:[...records]});}return {jobId:'JOB01996'};},
     async jobStatus(jobId){const reconciliation=jobId==='JOB01997';const pending=reconciliation?options.reconciliationPending:options.pendingJob;return {jobId,status:pending?'ACTIVE':'OUTPUT',returnCode:pending?null:reconciliation?options.reconciliationRc??4:options.statusRc??0};},
-    async jobSpool(jobId){if(jobId==='JOB01997')return `IEF142I LS123456 VSAMCRT - STEP WAS EXECUTED - COND CODE 0000\nIEF142I LS123456 VSAMLOAD - STEP WAS EXECUTED - COND CODE 0000\nIEF142I LS123456 RECONCIL - STEP WAS EXECUTED - COND CODE ${String(options.reconciliationRc??4).padStart(4,'0')}\nTRANSACTION INPUT COUNT: 0000002\nSETTLEMENT INPUT COUNT:  0000002\nMATCHED COUNT:           0000000\nMISMATCHED COUNT:        0000000\nTRANSACTION-ONLY COUNT:  0000002\nSETTLEMENT-ONLY COUNT:   0000002`;return options.failedStep?'IEF142I LS123456 TXNSORT - STEP WAS EXECUTED - COND CODE 0008':spool(options.statusRc===8?8:0);},
+    async jobSpool(jobId){if(jobId==='JOB01997'&&options.tenK)return `IEF142I LS123456 VSAMCRT - STEP WAS EXECUTED - COND CODE 0000\nIEF142I LS123456 VSAMLOAD - STEP WAS EXECUTED - COND CODE 0000\nIEF142I LS123456 RECONCIL - STEP WAS EXECUTED - COND CODE ${String(options.reconciliationRc??4).padStart(4,'0')}\nTRANSACTION INPUT COUNT: 10000\nSETTLEMENT INPUT COUNT: 10000\nMATCHED COUNT: ${options.tenK==='negative'?9990:10000}\nMISMATCHED COUNT: ${options.tenK==='negative'?10:0}\nTRANSACTION-ONLY COUNT: 0\nSETTLEMENT-ONLY COUNT: 0`;if(jobId==='JOB01997')return `IEF142I LS123456 VSAMCRT - STEP WAS EXECUTED - COND CODE 0000\nIEF142I LS123456 VSAMLOAD - STEP WAS EXECUTED - COND CODE 0000\nIEF142I LS123456 RECONCIL - STEP WAS EXECUTED - COND CODE ${String(options.reconciliationRc??4).padStart(4,'0')}\nTRANSACTION INPUT COUNT: 0000002\nSETTLEMENT INPUT COUNT:  0000002\nMATCHED COUNT:           0000000\nMISMATCHED COUNT:        0000000\nTRANSACTION-ONLY COUNT:  0000002\nSETTLEMENT-ONLY COUNT:   0000002`;return options.failedStep?'IEF142I LS123456 TXNSORT - STEP WAS EXECUTED - COND CODE 0008':spool(options.statusRc===8?8:0);},
   };
   const deps:PreflightDependencies={env,stagingRoot,remote,persist:async()=>undefined,ownership:async()=>undefined,readiness:async()=>({state:'DATASET_ACCESS_VERIFIED',message:'verified'}),sleep:async()=>undefined,pollAttempts:1};
-  return {op,deps,stagingRoot,options,counts:()=>({createCalls,uploadCalls,submitCalls,deleteCalls,reconciliationSubmitted})};
+  return {op,deps,stagingRoot,options,counts:()=>({createCalls,uploadCalls,submitCalls,moduleChecks,deleteCalls,reconciliationSubmitted})};
 }
 const reconciliationEnv:NodeJS.ProcessEnv={...env,MAINFRAME_ENABLED:'true',MAINFRAME_AUTH_READY:'true',MAINFRAME_RECONCILIATION_ENABLED:'true',MAINFRAME_ENDPOINT:'https://zosmf.example.invalid'};
 async function readyForReconciliation(f:Awaited<ReturnType<typeof fixture>>){const preflight=await executeBankingPreflight(f.op,f.deps);if(preflight.state==='READY_FOR_RECONCILIATION')f.deps.env=reconciliationEnv;return preflight;}
@@ -110,7 +111,7 @@ test('duplicate preflight evidence blocks VSAM and COBOL without another JES sub
 test('unverified load module blocks before output collision checks or VSAM/COBOL submission',async()=>{
   const f=await fixture({moduleVerified:false});try{
     const preflight=await readyForReconciliation(f);const result=await executeBankingReconciliationStage(preflight,f.deps);
-    assert.equal(result.state,'RECONCILIATION_BLOCKED');assert.equal(result.errorCategory,'LOAD_MODULE_UNVERIFIED');assert.equal(f.counts().submitCalls,1);assert.equal(f.counts().reconciliationSubmitted,false);
+    assert.equal(result.state,'RECONCILIATION_BLOCKED');assert.equal(result.errorCategory,'LOAD_MODULE_UNVERIFIED');assert.equal(f.counts().moduleChecks,1);assert.equal(f.counts().submitCalls,1);assert.equal(f.counts().reconciliationSubmitted,false);
     assert.equal((result.stageResults.reconciliation as {loadModule:{verified:boolean}}).loadModule.verified,false);
   }finally{await fs.rm(f.stagingRoot,{recursive:true,force:true});}
 });
@@ -124,7 +125,7 @@ test('a load-module-only pre-submission block resumes the same run without repea
     f.options.moduleVerified=true;
     const resumed=await executeBankingReconciliationStage(blocked,f.deps);
     assert.equal(resumed.operationId,preflight.operationId);assert.equal(resumed.runId,preflight.runId);assert.equal(resumed.state,'RECONCILIATION_COMPLETED_WITH_EXCEPTIONS');
-    assert.equal(f.counts().createCalls,2);assert.equal(f.counts().uploadCalls,2);assert.equal(f.counts().submitCalls,2);
+    assert.equal(f.counts().moduleChecks,2);assert.equal(f.counts().createCalls,2);assert.equal(f.counts().uploadCalls,2);assert.equal(f.counts().submitCalls,2);
     assert.equal(resumed.datasets.filter(item=>['SETTLE','SETTLE_DATA','SETTLE_INDEX','MATCHOUT','MISMOUT','TXNMISS','SETMISS'].includes(item.role)).length,7);
   }finally{await fs.rm(f.stagingRoot,{recursive:true,force:true});}
 });
@@ -142,4 +143,63 @@ test('uncertain VSAM/COBOL submission is persisted unresolved and never retried'
     assert.equal(result.state,'RECONCILIATION_UNRESOLVED');assert.equal(result.errorCategory,'RECONCILIATION_SUBMISSION_UNCERTAIN');assert.equal(f.counts().submitCalls,2);
     await executeBankingReconciliationStage(result,f.deps);assert.equal(f.counts().submitCalls,2);
   }finally{await fs.rm(f.stagingRoot,{recursive:true,force:true});}
+});
+
+
+test('confirmed IDCAMS syntax failure retries the same manifest only after every target is absent',async()=>{
+  const f=await fixture({reconciliationRc:12});try{
+    const ready=await readyForReconciliation(f);const failed=await executeBankingReconciliationStage(ready,f.deps);
+    const evidence=failed.stageResults.reconciliation as Record<string,unknown>;
+    evidence.spoolText="IEF142I LS123456 VSAMCRT - STEP WAS EXECUTED - COND CODE 0012\nIDC3211I KEYWORD 'DATA' IS IMPROPER";
+    assert.equal(canRetryDefineClusterFailure(failed),true);
+    const unresolved=structuredClone(failed);unresolved.state='RECONCILIATION_UNRESOLVED';assert.equal(canRetryDefineClusterFailure(unresolved),false);
+    const originalAttributes=f.deps.remote.attributes;
+    const targets=new Set(failed.datasets.filter(item=>item.state==='UNCERTAIN').map(item=>item.name));
+    const checked:string[]=[];
+    f.deps.remote.attributes=async dataset=>{
+      if(targets.has(dataset)&&f.counts().submitCalls===2){checked.push(dataset);throw Object.assign(new Error('exact absence'),{code:'DATASET_NOT_FOUND'});}
+      return originalAttributes(dataset);
+    };
+    f.options.reconciliationRc=4;
+    const runId=failed.runId,manifest=failed.datasets.map(item=>item.name);
+    const result=await executeBankingReconciliationStage(failed,f.deps);
+    assert.equal(result.state,'RECONCILIATION_COMPLETED_WITH_EXCEPTIONS');assert.equal(result.runId,runId);
+    assert.deepEqual(result.datasets.map(item=>item.name),manifest);assert.equal(new Set(checked).size,7);
+    assert.equal(f.counts().uploadCalls,2);assert.equal(f.counts().submitCalls,3);
+    const attempts=result.stageResults.reconciliationAttempts as Array<{evidence:Record<string,unknown>}>;
+    assert.equal(attempts.length,1);assert.equal(attempts[0]!.evidence.spoolText,evidence.spoolText);
+  }finally{await fs.rm(f.stagingRoot,{recursive:true,force:true});}
+});
+
+test('RC12 recovery blocks existing or inconclusive targets without submission or cleanup',async()=>{
+  for(const category of ['EXISTS','AUTHORIZATION']){
+    const f=await fixture({reconciliationRc:12});try{
+      const failed=await executeBankingReconciliationStage(await readyForReconciliation(f),f.deps);
+      (failed.stageResults.reconciliation as Record<string,unknown>).spoolText="IEF142I LS123456 VSAMCRT - STEP WAS EXECUTED - COND CODE 0012\nIDC3211I KEYWORD 'DATA' IS IMPROPER";
+      const original=f.deps.remote.attributes;
+      f.deps.remote.attributes=async dataset=>{if(dataset===failed.plan.datasets.SETTLE){if(category==='AUTHORIZATION')throw Object.assign(new Error('denied'),{code:category});return {dsname:dataset,dsorg:'VS',lrecl:38};}return original(dataset);};
+      const result=await executeBankingReconciliationStage(failed,f.deps);
+      assert.equal(result.state,'RECONCILIATION_BLOCKED');assert.equal(result.errorCategory,category==='EXISTS'?'DATASET_COLLISION':'AUTHORIZATION');
+      assert.equal(f.counts().submitCalls,2);assert.equal(f.counts().deleteCalls,0);
+      assert.equal(result.datasets.filter(item=>item.state==='UNCERTAIN').length,7);
+    }finally{await fs.rm(f.stagingRoot,{recursive:true,force:true});}
+  }
+});
+
+test('post-job recovery reads existing evidence without another submission or upload',async()=>{
+ const f=await fixture();try{
+ const result=await executeBankingReconciliationStage(await readyForReconciliation(f),f.deps);
+ result.state='RECONCILIATION_FAILED';result.stage='VSAM_AND_OUTPUT_DATASET_VERIFICATION';
+ (result.stageResults.reconciliation as Record<string,unknown>).failure={stage:result.stage,category:'RFJ_RESOURCE_INVALID'};
+ await assert.rejects(()=>recoverBankingOutputVerification(result,f.deps),/successful existing job/);assert.equal(f.counts().submitCalls,2);assert.equal(f.counts().uploadCalls,2);
+ }finally{await fs.rm(f.stagingRoot,{recursive:true,force:true});}
+});
+
+test('10K orchestration retains verified RC4 amount-discrepancy evidence and rejects technical RCs',async()=>{
+ for(const rc of [0,4,8,12]){const negative=rc!==0,f=await fixture({tenK:negative?'negative':'positive',reconciliationRc:rc});try{
+  const result=await executeBankingReconciliationStage(await readyForReconciliation(f),f.deps);
+  if(rc===0||rc===4){assert.equal(result.state,rc===4?'RECONCILIATION_COMPLETED_WITH_EXCEPTIONS':'RECONCILIATION_COMPLETED');const rec=result.stageResults.reconciliation as {job:{jobId:string;returnCode:number};summary:{matchedCount:number;mismatchedCount:number;transactionOnlyCount:number;settlementOnlyCount:number};outputs:Record<string,{verified:boolean}>};assert.equal(rec.job.jobId,'JOB01997');assert.equal(rec.job.returnCode,rc);assert.equal(rec.summary.matchedCount,rc===4?9990:10000);assert.equal(rec.summary.mismatchedCount,rc===4?10:0);assert.equal(rec.summary.transactionOnlyCount+rec.summary.settlementOnlyCount,0);assert.equal(rec.outputs.MISMOUT?.verified,true);}
+  else assert.equal(result.state,'RECONCILIATION_FAILED');
+  const submitted=f.counts().submitCalls;await executeBankingReconciliationStage(result,f.deps);assert.equal(f.counts().submitCalls,submitted);
+ }finally{await fs.rm(f.stagingRoot,{recursive:true,force:true});}}
 });

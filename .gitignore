@@ -10,3 +10,11 @@ server/.uploads/
 .env.*
 !.env.example
 coverage/
+
+# Local Zowe profiles and private credential material
+.zowe/
+zowe.config.json
+zowe.config.user.json
+*.key
+*.p12
+*.pfx

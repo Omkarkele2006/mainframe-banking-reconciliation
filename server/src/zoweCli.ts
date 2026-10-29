@@ -305,7 +305,7 @@ function operationFailure(category: string, raw = ''): ZoweOperationFailure {
     ...(evidence.httpStatus ? { httpStatus: evidence.httpStatus } : {}),
   });
 }
-export type ZoweOperationDependencies = Pick<ZoweDependencies, 'locate' | 'invoke' | 'timeoutMs' | 'platform' | 'env'> & { stagingRoot?: string };
+export type ZoweOperationDependencies = Pick<ZoweDependencies, 'locate' | 'invoke' | 'timeoutMs' | 'platform' | 'env'> & { stagingRoot?: string; memberDiagnostic?: (summary: Record<string, unknown>) => void };
 
 /** Executes one of the fixed typed operations above and returns only validated RFJ data. */
 export async function invokeZoweOperation(operation: ZoweOperation, dependencies: ZoweOperationDependencies = {}): Promise<ZoweOperationResult> {
@@ -337,6 +337,14 @@ export async function invokeZoweOperation(operation: ZoweOperation, dependencies
   catch (error) {
     const category = safeFailureCategory(error);
     throw operationFailure(category, (error as Error)?.message ?? '');
+  }
+  if (operation.kind === 'datasetMemberList') {
+    const obj = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
+    let raw: unknown; try { raw = JSON.parse(result.stdout.replace(/^\uFEFF/, '').trim()); } catch { /* record shape only */ }
+    const top = obj(raw), nested = obj(top.data), api = obj(nested.apiResponse), first = obj(Array.isArray(api.items) ? api.items[0] : undefined);
+    const keys = (v: Record<string, unknown>) => Object.keys(v).slice(0, 30).map(key => sanitizeText(key, 48));
+    const indicator = (v: unknown) => typeof v === 'boolean' || typeof v === 'number' ? v : v === undefined ? 'ABSENT' : 'INVALID';
+    dependencies.memberDiagnostic?.({library: operation.dataset.toUpperCase(), member: operation.member.toUpperCase(), processExitCode: result.exitCode, processSuccess: result.exitCode === 0, topKeys: keys(top), dataKeys: keys(nested), apiResponseKeys: keys(api), outerSuccess: indicator(top.success), outerExitCode: indicator(top.exitCode), nestedSuccess: indicator(nested.success), nestedExitCode: indicator(nested.exitCode), apiSuccess: indicator(api.success), itemsArray: Array.isArray(api.items), itemCount: Array.isArray(api.items) ? api.items.length : null, returnedRows: indicator(api.returnedRows), firstItemKeys: keys(first), firstMember: typeof first.member === 'string' && /^[A-Z0-9#$@]{1,8}$/i.test(first.member) ? first.member : null});
   }
   if (result.exitCode !== 0) {
     let detail = result.stderr;
@@ -381,7 +389,7 @@ export async function invokeZoweOperation(operation: ZoweOperation, dependencies
     // An empty, successful exact-name query is the only proof of absence. Any
     // unexpected row makes the result inconclusive and must stop allocation.
     const expectedName = normalizeDatasetName(operation.dataset)!;
-    if (returnedNames.some((name) => name === undefined || name !== expectedName)) {
+    if (returnedNames.some(name=>name===undefined) || returnedNames.filter(name=>name===expectedName).length!==1 && items.length!==0 || returnedNames.some(name=>name!==expectedName && (!expectedName.endsWith('.SETTLE') || ![expectedName.replace(/SETTLE$/, 'SETDATA'),expectedName.replace(/SETTLE$/, 'SETIDX')].includes(name!)))) {
       throw Object.assign(new Error('Zowe data set response did not verify the requested resource.'), { code: 'RFJ_RESOURCE_INVALID' });
     }
     }

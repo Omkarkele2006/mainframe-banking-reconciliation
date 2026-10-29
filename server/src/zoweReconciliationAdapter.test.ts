@@ -30,7 +30,13 @@ test('normalizes the captured RFJ load-member envelope and fails closed on non-s
   const captured = { success: true, exitCode: 0, message: 'completed', stdout: '', stderr: '', data: { success: true, apiResponse: { items: [{ member: 'RECONCIL', ac: '00', amode: '31', rmode: 'ANY', size: '00004874', ttr: '00001E' }], returnedRows: 1 } } };
   const invokeResponse = (response: unknown, processExitCode = 0) => ({ exitCode: processExitCode, stdout: JSON.stringify(response), stderr: '' });
   const exact = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse(captured) });
-  assert.equal((await exact.verifyLoadModule('Z73968.LOAD', 'RECONCIL')).verified, true);
+  const verified = await exact.verifyLoadModule('Z73968.LOAD', 'RECONCIL');
+  assert.equal(verified.verified, true);
+  assert.equal(verified.diagnostic?.processExitCode, 0);
+  assert.equal(verified.diagnostic?.nestedSuccess, true);
+  assert.equal(verified.diagnostic?.firstMember, 'RECONCIL');
+  assert.equal(verified.diagnostic?.itemCount, 1);
+  assert.equal(JSON.stringify(verified.diagnostic).includes('00004874'), false);
   const nestedData = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => invokeResponse({ success: true, exitCode: 0, data: { success: true, exitCode: 0, data: captured.data } }) });
   assert.equal((await nestedData.verifyLoadModule('Z73968.LOAD', 'RECONCIL')).verified, true);
 
@@ -84,4 +90,11 @@ test('rejects missing return codes, mismatched spool jobs and malformed spool re
   assert.throws(() => zoweSpoolAdapterInternals.spoolText([{ jobid: 'JOB12345', output: 'x' }], 'JOB12345'), /readable records/);
   const adapter = createZoweReconciliationAdapter({ locate: async () => 'zowe', invoke: async () => ok({ jobid: 'JOB12345', status: 'OUTPUT' }) });
   await assert.rejects(adapter.jobStatus('JOB12345'), /parseable condition code/);
+});
+
+test('VSAM inventory accepts exact cluster with its two components and preserves PS output lengths',async()=>{
+ const cluster='Z73968.EV9R0A2L.SETTLE';
+ const adapter=createZoweReconciliationAdapter({locate:async()=>'zowe',invoke:async()=>ok({success:true,apiResponse:{items:[{dsname:cluster,dsorg:'VS'},{dsname:'Z73968.EV9R0A2L.SETDATA',dsorg:'VS'},{dsname:'Z73968.EV9R0A2L.SETIDX',dsorg:'VS'}]}})});
+ assert.equal((await adapter.attributes(cluster)).dsorg,'VS');
+ for(const [suffix,lrecl] of [['MATCHOUT',38],['MISMOUT',120],['TXNMISS',120],['SETMISS',120]] as const){const name=`Z73968.EV9R0A2L.${suffix}`;const ps=createZoweReconciliationAdapter({locate:async()=>'zowe',invoke:async()=>ok({success:true,apiResponse:{items:[{dsname:name,dsorg:'PS',recfm:'FB',lrecl}]}})});assert.equal((await ps.attributes(name)).lrecl,lrecl);}
 });

@@ -67,7 +67,7 @@ export function requireOperator(req: AuthRequest, res: Response, next: NextFunct
   const token = cookieToken(req);
   const session = token ? sessions.get(token) : undefined;
   const supplied = req.get('x-csrf-token') ?? '';
-  if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method) && (!session || supplied.length !== session.csrfToken.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(session.csrfToken)))) {
+  if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method) && (!session || !/^[a-f0-9]{64}$/i.test(supplied) || supplied.length !== session.csrfToken.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(session.csrfToken)))) {
     res.status(403).json({ code: 'CSRF_REJECTED', message: 'The session request token is missing or invalid. Refresh the page and try again.' }); return;
   }
   next();

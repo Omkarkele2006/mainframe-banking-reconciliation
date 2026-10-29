@@ -49,7 +49,7 @@ export type ZoweWorkbenchAdapter = ReconciliationRemote & {
   listDatasets(scope: string): Promise<Array<Record<string, unknown>>>;
   datasetAttributes(dataset: string): Promise<Record<string, unknown>>;
   downloadDataset(dataset: string, localPath: string): Promise<void>;
-  verifyLoadModule(library: string, member: string): Promise<{ verified: boolean; evidence?: string; message?: string }>;
+  verifyLoadModule(library: string, member: string): Promise<{ verified: boolean; evidence?: string; message?: string; diagnostic?: Record<string, unknown> }>;
 };
 export function createZoweReconciliationAdapter(dependencies: ZoweOperationDependencies = {}): ZoweWorkbenchAdapter {
   return {
@@ -68,22 +68,26 @@ export function createZoweReconciliationAdapter(dependencies: ZoweOperationDepen
     },
     async verifyLoadModule(library, member) {
       if (library.trim().toUpperCase() !== 'Z73968.LOAD' || member.trim().toUpperCase() !== 'RECONCIL') throw Object.assign(new Error('Only the configured Z73968.LOAD(RECONCIL) member check is supported.'), { code: 'LOAD_MODULE_QUERY_INVALID' });
-      const result = await invokeZoweOperation({ kind: 'datasetMemberList', dataset: library, member }, dependencies);
+      let diagnostic: Record<string, unknown> = {library: library.toUpperCase(), member: member.toUpperCase(), processSuccess: false};
+      let result;
+      try { result = await invokeZoweOperation({ kind: 'datasetMemberList', dataset: library, member }, {...dependencies, memberDiagnostic: summary => { diagnostic = summary; }}); }
+      catch (error) { throw Object.assign(error as Error, {loadModuleDiagnostic: {...diagnostic, verified: false, failureCategory: (error as {code?:string}).code ?? 'DATASET_RESPONSE_INVALID'}}); }
       if (result.envelope.success !== true || result.envelope.exitCode !== 0) throw Object.assign(new Error('The load-module query did not confirm a successful Zowe CLI operation.'), { code: 'DATASET_RESPONSE_INVALID' });
       const data = object(result.data); const response = object(data?.apiResponse); const items = response?.items;
       if (data?.success !== true || !Array.isArray(items)) throw Object.assign(new Error('The load-module member query did not return a validated response.'), { code: 'DATASET_RESPONSE_INVALID' });
       if (items.length > 1 || (response?.returnedRows !== undefined && response.returnedRows !== items.length)) throw Object.assign(new Error('The load-module member query returned an ambiguous response.'), { code: 'DATASET_RESPONSE_INVALID' });
       const found = items.length === 1 && typeof object(items[0])?.member === 'string' && (object(items[0])!.member as string).toUpperCase() === member.toUpperCase();
-      if (!found) return { verified: false, message: `The configured load member ${member.toUpperCase()} was not returned by the exact member query.` };
-      return { verified: true, evidence: `Exact member ${library.toUpperCase()}(${member.toUpperCase()}) returned by Zowe CLI all-members query.` };
+      if (!found) return { verified: false, diagnostic: {...diagnostic, verified: false, failureCategory: 'LOAD_MODULE_UNVERIFIED'}, message: `The configured load member ${member.toUpperCase()} was not returned by the exact member query.` };
+      return { verified: true, diagnostic: {...diagnostic, verified: true, failureCategory: null}, evidence: `Exact member ${library.toUpperCase()}(${member.toUpperCase()}) returned by Zowe CLI all-members query.` };
     },
     async attributes(dataset) {
       const result = await invokeZoweOperation({ kind: 'datasetAttributes', dataset }, dependencies);
       const data = object(result.data); const response = object(data?.apiResponse); const items = response?.items;
       if (!data || data.success !== true || !Array.isArray(items)) throw Object.assign(new Error('Dataset query did not return a validated resource list.'), { code: 'DATASET_RESPONSE_INVALID' });
       if (items.length === 0) throw Object.assign(new Error('Exact-name query confirmed the dataset is absent.'), { code: 'DATASET_NOT_FOUND' });
-      if (items.length !== 1) throw Object.assign(new Error('Exact-name query returned an ambiguous resource list.'), { code: 'DATASET_RESPONSE_INVALID' });
-      const row = object(items[0]);
+      const exact=items.filter(item=>typeof object(item)?.dsname==='string'&&(object(item)!.dsname as string).toUpperCase()===dataset.toUpperCase());
+      if(exact.length!==1)throw Object.assign(new Error('Exact-name query returned an ambiguous resource list.'),{code:'DATASET_RESPONSE_INVALID'});
+      const row = object(exact[0]);
       if (!row || typeof row.dsname !== 'string' || row.dsname.toUpperCase() !== dataset.toUpperCase()) throw Object.assign(new Error('Dataset query returned a different dataset.'), { code: 'DATASET_RESPONSE_INVALID' });
       const lrecl = numeric(row.lrecl);
       return { dsname: row.dsname, ...(typeof row.dsorg === 'string' ? { dsorg: row.dsorg } : {}), ...(typeof row.recfm === 'string' ? { recfm: row.recfm } : {}), ...(lrecl !== undefined ? { lrecl } : {}) };

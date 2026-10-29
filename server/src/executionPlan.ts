@@ -311,9 +311,9 @@ export function generateReconciliationJcl(plan: RunExecutionPlan): string {
     '//SYSIN    DD *',
     '  DEFINE CLUSTER ( -',
     `    NAME(${plan.datasets.SETTLE}) -`,
-    `    INDEXED KEYS(10 0) RECORDSIZE(38 38) TRACKS(${plan.allocation.settlementVsamPrimaryTracks} ${plan.allocation.settlementVsamSecondaryTracks}) -`,
+    `    INDEXED KEYS(10 0) RECORDSIZE(38 38) TRACKS(${plan.allocation.settlementVsamPrimaryTracks} ${plan.allocation.settlementVsamSecondaryTracks})) -`,
     `    DATA (NAME(${plan.datasets.SETTLE_DATA})) -`,
-    `    INDEX (NAME(${plan.datasets.SETTLE_INDEX})) )`,
+    `    INDEX (NAME(${plan.datasets.SETTLE_INDEX}))`,
     '/*',
     '//IFCRT    IF (VSAMCRT.RC = 0) THEN',
     '//VSAMLOAD EXEC PGM=IDCAMS',
@@ -347,7 +347,9 @@ export function parseCobolCounts(spool: string): CobolCounts {
   ];
   const counts = {} as CobolCounts;
   for (const [key, label] of labels) {
-    const match = spool.match(new RegExp(`^\\s*${label}:\\s*(\\d+)\\s*$`, 'im'));
+    const matches = [...spool.matchAll(new RegExp(`^\\s*${label}:\\s*(\\d+)\\s*$`, 'gim'))];
+    if(matches.length>1)throw new Error(`Ambiguous duplicate COBOL count: ${label}.`);
+    const match=matches[0];
     if (!match) throw new Error(`Required COBOL count is missing: ${label}.`);
     const value = Number(match[1]);
     if (!Number.isSafeInteger(value) || value < 0) throw new Error(`COBOL count is invalid: ${label}.`);
@@ -394,6 +396,7 @@ export function eodPublicationAllowed(returnCode: number, counts: CobolCounts, a
   return Number.isInteger(returnCode) && returnCode === 0
     && allCounts.every((count) => Number.isSafeInteger(count) && count >= 0)
     && duplicateSettlementCount === 0
+    && counts.mismatchedCount === 0 && counts.transactionOnlyCount === 0 && counts.settlementOnlyCount === 0
     && !countConsistencyError(counts)
     && counts.matchedCount === actualOutputCounts.matchedCount
     && counts.mismatchedCount === actualOutputCounts.mismatchedCount
